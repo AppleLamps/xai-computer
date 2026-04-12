@@ -26,9 +26,17 @@ Key types:
 
 When the model returns tool calls, `core.py` splits them into read-only (executed immediately) and mutating (batched into an `ApprovalCard`, shown to user, executed only after approval).
 
-### `xai_client.py` — API client
+### `xai_client.py` — API client (tool-calling loop)
 
-Minimal HTTPS client for the xAI chat completions endpoint. Uses only `urllib` from the standard library. Parses tool calls from the response. No external HTTP library required.
+Minimal HTTPS client for the xAI chat completions endpoint. Uses only `urllib` from the standard library. Handles the main conversational tool-calling loop. No external HTTP library required.
+
+### `xai_structured.py` — Structured output client
+
+Uses the xAI SDK's `chat.parse()` method to get type-safe Pydantic responses for specific tasks: shell command explanations and execution summaries. Only used for UI enrichment — never for safety decisions. Falls back to `None` if the model is not Grok 4, the API key is missing, or the SDK call fails.
+
+### `structured_models.py` — Pydantic schemas
+
+Defines the Pydantic models (`ShellCommandExplanation`, `ExecutionSummary`, `ActionPlanExplanation`) sent to the xAI API via `chat.parse()`. Every field has a `Field(description=...)` so the schema is self-documenting to the model.
 
 ### `schemas.py` — Tool definitions
 

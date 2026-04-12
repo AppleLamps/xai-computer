@@ -72,6 +72,8 @@ class ApprovalCard:
     dry_run: bool = False
     risk_level: str = "low"  # overall: max of individual risks
     summary: str = ""
+    # Optional structured enrichment (populated by xai_structured.py when available)
+    shell_explanation: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.actions:
@@ -176,10 +178,28 @@ def build_approval_card(tool_calls: list[ToolCallSpec]) -> ApprovalCard:
         )
         for i, tc in enumerate(tool_calls)
     ]
+
+    # Try to enrich shell commands with structured explanations
+    shell_explanation: dict[str, str] | None = None
+    shell_actions = [tc for tc in tool_calls if tc.name == "run_command"]
+    if shell_actions:
+        cmd = shell_actions[0].arguments.get("command", "")
+        tier = "risky"  # default; will be overridden below
+        for a in actions:
+            if a.tool_name == "run_command":
+                tier = a.risk
+                break
+        try:
+            from xai_structured import explain_shell_command
+            shell_explanation = explain_shell_command(cmd, tier)
+        except Exception:
+            pass  # fallback: no explanation
+
     return ApprovalCard(
         actions=actions,
         affected_root=_detect_affected_root(actions),
         dry_run=is_dry_run(),
+        shell_explanation=shell_explanation,
     )
 
 
@@ -328,9 +348,31 @@ def _process_tool_calls(
                 log_event("tool_error", {"tool": b.name, "error": res.get("error")}, phase="error")
 
         if approved:
-            sink.info(f"Completed {executed}/{len(block)} operation(s).")
+            # Try structured summary; fall back to plain text
+            structured_summary = _try_structured_summary(block, executed)
+            if structured_summary:
+                sink.info(structured_summary)
+            else:
+                sink.info(f"Completed {executed}/{len(block)} operation(s).")
 
         i = j
+
+
+def _try_structured_summary(block: list[ToolCallSpec], executed: int) -> str | None:
+    """Attempt to get a structured execution summary. Returns formatted string or None."""
+    try:
+        from xai_structured import summarize_execution
+        results = [{"ok": True}] * executed + [{"ok": False}] * (len(block) - executed)
+        has_shell = any(b.name == "run_command" for b in block)
+        summary = summarize_execution(results, dry_run=is_dry_run())
+        if summary:
+            parts = [f"Completed {summary['actions_completed']}/{len(block)} operation(s)."]
+            if summary.get("one_line_summary"):
+                parts.append(summary["one_line_summary"])
+            return "  ".join(parts)
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------

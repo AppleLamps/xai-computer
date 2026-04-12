@@ -77,6 +77,8 @@ User input
   Results appended to conversation ── loop back to model or render final response
 ```
 
+**Structured outputs.** On Grok 4 models, the app uses the xAI SDK's `chat.parse()` to get type-safe structured responses for shell command explanations and execution summaries. These are used for richer UI rendering only — never for safety decisions. If structured output is unavailable (non-Grok-4 model, network error), the app falls back to existing behavior.
+
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details on each module.
 
 ## Project Structure
@@ -90,6 +92,8 @@ tools.py           17 local tools (filesystem, analysis, shell, browser)
 schemas.py         System prompt and tool JSON schemas for the API
 safety.py          Path allowlisting, traversal protection, confirmation parsing
 shell_guard.py     Deterministic shell command classifier (blocklist + allowlist)
+structured_models.py  Pydantic models for structured output responses
+xai_structured.py  xAI SDK wrapper for structured output calls (chat.parse)
 config.py          .env loading, model presets, runtime state
 logger.py          Append-only JSONL logging with session tracking
 undo.py            Undo stack (record, reverse, history)
@@ -97,7 +101,7 @@ xai_client.py      Minimal HTTPS client for xAI chat completions
 pyproject.toml     Pytest configuration
 requirements.txt   Runtime dependency (python-dotenv)
 .env.example       Template for environment variables
-tests/             188 tests (safety, tools, shell guard, undo, config, core)
+tests/             203 tests (safety, tools, shell guard, structured output, undo, config, core)
 logs/              Runtime action logs (created automatically)
 state/             Undo history (created automatically)
 docs/              Architecture and reference documentation
@@ -314,7 +318,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **188 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
+Current status: **203 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
 
 ## Troubleshooting
 

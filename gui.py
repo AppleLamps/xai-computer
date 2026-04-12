@@ -636,6 +636,23 @@ class AssistantApp:
                 font=self._f_ui_sm, bg=_BG_APPROVAL, fg=risk_fg,
             ).pack(anchor=tk.W)
 
+            # Structured shell explanation (from xai_structured.py if available)
+            if card.shell_explanation:
+                exp = card.shell_explanation
+                exp_frame = tk.Frame(inner, bg=_BG_APPROVAL)
+                exp_frame.pack(fill=tk.X, pady=(4, 0))
+                for label, key in [("Does", "what_it_does"),
+                                   ("Side effects", "side_effects"),
+                                   ("Risk", "risk_reason")]:
+                    val = exp.get(key, "")
+                    if val:
+                        tk.Label(
+                            exp_frame,
+                            text=f"  {label}: {val}",
+                            font=self._f_ui_sm, bg=_BG_APPROVAL, fg=_FG_LABEL,
+                            anchor=tk.W, wraplength=560, justify=tk.LEFT,
+                        ).pack(anchor=tk.W)
+
         # Scope + summary
         meta_parts: list[str] = []
         if card.affected_root:

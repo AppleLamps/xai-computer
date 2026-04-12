@@ -16,6 +16,7 @@ load_dotenv()
 MODELS: dict[str, str] = {
     "fast": "grok-4-1-fast-reasoning",
     "quality": "grok-4.20-0309-reasoning",
+    "code": "grok-code-fast-1",
 }
 
 # ---------------------------------------------------------------------------

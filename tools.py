@@ -33,7 +33,7 @@ from shell_guard import (
     truncate_output,
     validate_working_dir,
 )
-from undo import record_create_folder, record_move, record_organize_move, record_rename
+from undo import record_create_folder, record_move, record_organize_move, record_rename, record_write_file
 
 ToolHandler = Callable[..., dict[str, Any]]
 
@@ -872,6 +872,81 @@ def run_command(command: str, working_dir: str | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# File writing
+# ---------------------------------------------------------------------------
+
+_WRITE_MAX_BYTES = 500_000  # 500 KB
+
+
+def write_file(path: str, content: str, overwrite: bool = False) -> dict[str, Any]:
+    """Write text content to a file within allowed roots.
+
+    New files can be undone (sent to Recycle Bin).
+    Overwrites create a .bak backup first; undo restores the backup.
+    Content is capped at 500 KB.  Only UTF-8 text is accepted.
+    """
+    try:
+        fp = require_allowed_path(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+
+    # Validate content
+    if not isinstance(content, str):
+        return {"ok": False, "error": "Content must be a text string."}
+    encoded = content.encode("utf-8")
+    if len(encoded) > _WRITE_MAX_BYTES:
+        return {"ok": False, "error": f"Content too large: {len(encoded)} bytes (max {_WRITE_MAX_BYTES})."}
+
+    # Check overwrite
+    file_exists = fp.exists()
+    if file_exists and not overwrite:
+        return {
+            "ok": False,
+            "error": f"File already exists: {fp}. Set overwrite=true to replace it (a .bak backup will be created).",
+        }
+
+    # Dry run
+    if is_dry_run():
+        action = "overwrite" if file_exists else "create"
+        log_event("write_file", {"path": str(fp), "action": action, "bytes": len(encoded)}, phase="dry_run")
+        return {"ok": True, "dry_run": True, "path": str(fp), "action": action, "bytes": len(encoded)}
+
+    # Backup before overwrite
+    backup_path: str | None = None
+    if file_exists and overwrite:
+        bak = fp.with_suffix(fp.suffix + ".bak")
+        try:
+            shutil.copy2(str(fp), str(bak))
+            backup_path = str(bak)
+        except OSError as e:
+            return {"ok": False, "error": f"Failed to create backup: {e}"}
+
+    # Write
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "error": f"Failed to write file: {e}"}
+
+    action = "overwritten" if file_exists else "created"
+    record_write_file(str(fp), backup_path)
+    log_event("write_file", {
+        "path": str(fp), "action": action, "bytes": len(encoded),
+        "backup": backup_path,
+    }, phase="executed")
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "path": str(fp),
+        "action": action,
+        "bytes": len(encoded),
+    }
+    if backup_path:
+        result["backup_path"] = backup_path
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -895,6 +970,7 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "create_folder": lambda **a: create_folder(a["path"]),
         "organize_desktop_by_type": lambda **a: organize_desktop_by_type(a.get("desktop_path")),
         "organize_folder": lambda **a: organize_folder(a["path"], a.get("mode", "type")),
+        "write_file": lambda **a: write_file(a["path"], a["content"], a.get("overwrite", False)),
         # Shell (constrained)
         "run_command": lambda **a: run_command(a["command"], a.get("working_dir")),
         # Browser

@@ -11,6 +11,7 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 - **Organize folders** — by file type, by month, or by year (desktop or any allowed folder)
 - **Show recent or largest files** — quick answers about what's taking up space
 - **Read small text files** — peek at file contents (capped at 100 KB)
+- **Write files** — create or update text/code files within allowed folders, with backup on overwrite and undo support
 - **Create folders** — with undo support
 - **Run shell commands** — constrained by a deterministic allowlist; dangerous patterns blocked unconditionally; all commands require confirmation
 - **Open URLs** — launches your default browser
@@ -88,7 +89,7 @@ app.py             CLI entry point
 gui.py             GUI entry point (Tkinter)
 cli.py             Terminal I/O, slash commands, approval rendering
 core.py            Conversation loop, tool dispatch, ApprovalCard
-tools.py           17 local tools (filesystem, analysis, shell, browser)
+tools.py           18 local tools (filesystem, analysis, write, shell, browser)
 schemas.py         System prompt and tool JSON schemas for the API
 safety.py          Path allowlisting, traversal protection, confirmation parsing
 shell_guard.py     Deterministic shell command classifier (blocklist + allowlist)
@@ -101,7 +102,7 @@ xai_client.py      Minimal HTTPS client for xAI chat completions
 pyproject.toml     Pytest configuration
 requirements.txt   Runtime dependency (python-dotenv)
 .env.example       Template for environment variables
-tests/             203 tests (safety, tools, shell guard, structured output, undo, config, core)
+tests/             215 tests (safety, tools, write_file, shell guard, structured output, undo, config, core)
 logs/              Runtime action logs (created automatically)
 state/             Undo history (created automatically)
 docs/              Architecture and reference documentation
@@ -161,6 +162,7 @@ All configuration is through environment variables in `.env`.
 |---|---|---|
 | `fast` | `grok-4-1-fast-reasoning` | Lower cost, faster responses |
 | `quality` | `grok-4.20-0309-reasoning` | Maximum reasoning quality |
+| `code` | `grok-code-fast-1` | Fastest and cheapest for code generation |
 
 ## Slash Commands
 
@@ -212,6 +214,7 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `create_folder` | Create a folder and any missing parents |
 | `organize_desktop_by_type` | Sort desktop files into category subfolders |
 | `organize_folder` | Sort any allowed folder by type, month, or year |
+| `write_file` | Create or update a text file (backup on overwrite, undo available) |
 | `run_command` | Run a constrained shell command (see [Shell Safety](docs/SHELL_SAFETY.md)) |
 
 ### Browser
@@ -289,6 +292,34 @@ You: open perplexity.ai
 Assistant: [calls open_url with https://www.perplexity.ai]
 ```
 
+## Coding Workflows
+
+The assistant can generate and write code files, making it useful for scaffolding projects and quick coding tasks.
+
+**What it can do:**
+- Generate and write HTML, CSS, JS, Python, or any text file
+- Scaffold project folder structures (create folders + write files)
+- Read existing code with `read_text_file`
+- Run tests with `run_command` (e.g., `pytest`)
+- Iterate on files: read, modify, write back with `overwrite=true`
+- Open results in the browser with `open_url`
+
+**How to use it:**
+```
+You: build a simple landing page in my Documents/projects/site folder
+You: write a Python script that converts CSV to JSON, save it to my Desktop
+You: read main.py and add error handling, then write it back
+```
+
+Use `/model code` for the fastest, cheapest code generation.
+
+**Limitations:**
+- No live preview server (write files, then open in browser manually)
+- No real-time collaborative editing (write-then-read loop only)
+- No binary files (images, compiled code, etc.)
+- Content capped at 500 KB per write
+- Overwrites require explicit `overwrite=true` and create a `.bak` backup
+
 ## Dry-Run and Undo
 
 **Dry-run mode** lets you see what would happen without making changes:
@@ -318,7 +349,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **203 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
+Current status: **215 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
 
 ## Troubleshooting
 

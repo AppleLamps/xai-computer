@@ -96,6 +96,19 @@ def record_create_folder(path: str) -> None:
     })
 
 
+def record_write_file(path: str, backup_path: str | None = None) -> None:
+    """Record a file write. New files can be sent to Recycle Bin on undo.
+    Overwrites store a backup_path so undo can restore the original."""
+    _append_record({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "session": SESSION_ID,
+        "action": "write_file",
+        "path": path,
+        "backup_path": backup_path,
+        "undone": False,
+    })
+
+
 def record_organize_move(source: str, destination: str) -> None:
     """Record a single file move done during desktop organization."""
     _append_record({
@@ -170,6 +183,41 @@ def undo_last() -> dict[str, Any]:
                 "restored_to": str(restore_to),
                 "note": note,
             }
+
+        elif action == "write_file":
+            written = Path(rec["path"])
+            backup = rec.get("backup_path")
+            if not written.exists():
+                records[target_idx]["undone"] = True
+                _save_all(records)
+                return {"ok": False, "error": f"File already gone: {written}"}
+            if backup:
+                # Overwrite case: restore the .bak file
+                bak = Path(backup)
+                if not bak.exists():
+                    records[target_idx]["undone"] = True
+                    _save_all(records)
+                    return {"ok": False, "error": f"Backup file missing: {bak}"}
+                shutil.move(str(bak), str(written))
+                records[target_idx]["undone"] = True
+                _save_all(records)
+                log_event("undo", {"action": action, "restored_backup": str(written)}, phase="undone")
+                return {"ok": True, "action": action, "restored_to": str(written),
+                        "note": " (original content restored from backup)"}
+            else:
+                # New file case: send to Recycle Bin
+                try:
+                    from send2trash import send2trash
+                    send2trash(str(written))
+                except ImportError:
+                    written.unlink()
+                except Exception as e:
+                    return {"ok": False, "error": f"Cannot send to Recycle Bin: {e}"}
+                records[target_idx]["undone"] = True
+                _save_all(records)
+                log_event("undo", {"action": action, "recycled": str(written)}, phase="undone")
+                return {"ok": True, "action": action, "removed": str(written),
+                        "note": " (sent to Recycle Bin)"}
 
         elif action == "create_folder":
             folder = Path(rec["path"])

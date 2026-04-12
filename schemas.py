@@ -32,6 +32,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "create_folder",
         "organize_desktop_by_type",
         "organize_folder",
+        "write_file",
         "run_command",
     }
 )
@@ -146,6 +147,22 @@ def get_tool_definitions() -> list[dict]:
                "mode": {"type": "string", "enum": ["type", "month", "year"],
                         "description": "Organization mode: 'type' (default), 'month', or 'year'."}},
               ["path"]),
+
+        # --- File writing ---
+        _tool("write_file",
+              "Create or update a text file. Writes UTF-8 content to a path within allowed roots. "
+              "If the file exists and overwrite is false, returns an error. "
+              "If overwrite is true, a .bak backup is created first. "
+              "Content is capped at 500 KB. Undo is available: new files go to Recycle Bin, "
+              "overwrites restore from the .bak backup.",
+              {"path": {"type": "string",
+                        "description": "Absolute path for the file to write."},
+               "content": {"type": "string",
+                           "description": "The text content to write to the file."},
+               "overwrite": {"type": "boolean",
+                             "description": "If true, overwrite an existing file (a .bak backup is created). "
+                                           "Default false."}},
+              ["path", "content"]),
 
         # --- Shell (constrained) ---
         _tool("run_command",

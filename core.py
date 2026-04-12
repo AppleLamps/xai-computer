@@ -103,6 +103,16 @@ def _action_label(tool: str, args: dict[str, Any]) -> str:
         return f"ORGANIZE DESKTOP {args.get('desktop_path', '(default)')}"
     if tool == "organize_folder":
         return f"ORGANIZE FOLDER {args.get('path', '?')} by {args.get('mode', 'type')}"
+    if tool == "write_file":
+        fp = args.get("path", "?")
+        ow = args.get("overwrite", False)
+        sz = len(args.get("content", "").encode("utf-8", errors="replace"))
+        label = f"WRITE {fp} ({sz} bytes)"
+        if ow:
+            label += " [OVERWRITE — .bak backup will be created]"
+        else:
+            label += " [NEW FILE]"
+        return label
     if tool == "run_command":
         cmd = args.get("command", "?")
         cwd = args.get("working_dir", "(project root)")
@@ -113,6 +123,10 @@ def _action_label(tool: str, args: dict[str, Any]) -> str:
 def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
     if tool in ("organize_desktop_by_type", "organize_folder"):
         return "medium"
+    if tool == "write_file":
+        if args and args.get("overwrite"):
+            return "medium"
+        return "low"
     if tool == "run_command":
         # Classify the command to determine risk tier
         if args:
@@ -129,6 +143,7 @@ def _build_summary(actions: list[PlannedAction]) -> str:
     move_count = sum(1 for a in actions if a.tool_name in ("move_file", "rename_file"))
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
     org_count = sum(1 for a in actions if a.tool_name in ("organize_desktop_by_type", "organize_folder"))
+    write_count = sum(1 for a in actions if a.tool_name == "write_file")
     cmd_count = sum(1 for a in actions if a.tool_name == "run_command")
 
     parts: list[str] = []
@@ -136,6 +151,8 @@ def _build_summary(actions: list[PlannedAction]) -> str:
         parts.append(f"{move_count} file operation(s)")
     if folder_count:
         parts.append(f"{folder_count} folder(s) to create")
+    if write_count:
+        parts.append(f"{write_count} file(s) to write")
     if org_count:
         parts.append(f"{org_count} organize operation(s)")
     if cmd_count:

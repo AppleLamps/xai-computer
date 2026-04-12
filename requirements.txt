@@ -1,6 +1,7 @@
 python-dotenv>=1.0.0
 xai_sdk>=0.1.0
 pydantic>=2.0.0
+send2trash>=1.8.0
 
 # Development / testing (optional)
 # pytest>=8.0.0

@@ -1,0 +1,4 @@
+python-dotenv>=1.0.0
+
+# Development / testing (optional)
+# pytest>=8.0.0

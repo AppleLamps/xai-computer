@@ -61,7 +61,7 @@ class PlannedAction:
         if not self.label:
             self.label = _action_label(self.tool_name, self.arguments)
         if not self.risk:
-            self.risk = _action_risk(self.tool_name)
+            self.risk = _action_risk(self.tool_name, self.arguments)
 
 
 @dataclass
@@ -75,8 +75,16 @@ class ApprovalCard:
 
     def __post_init__(self) -> None:
         if self.actions:
-            max_risk = "medium" if any(a.risk == "medium" for a in self.actions) else "low"
-            if self.risk_level == "low":
+            risks = {a.risk for a in self.actions}
+            if "high" in risks:
+                max_risk = "high"
+            elif "medium" in risks:
+                max_risk = "medium"
+            else:
+                max_risk = "low"
+            # Only escalate, never downgrade
+            risk_order = {"low": 0, "medium": 1, "high": 2}
+            if risk_order.get(max_risk, 0) > risk_order.get(self.risk_level, 0):
                 self.risk_level = max_risk
         if not self.summary:
             self.summary = _build_summary(self.actions)
@@ -93,13 +101,25 @@ def _action_label(tool: str, args: dict[str, Any]) -> str:
         return f"ORGANIZE DESKTOP {args.get('desktop_path', '(default)')}"
     if tool == "organize_folder":
         return f"ORGANIZE FOLDER {args.get('path', '?')} by {args.get('mode', 'type')}"
+    if tool == "run_command":
+        cmd = args.get("command", "?")
+        cwd = args.get("working_dir", "(project root)")
+        return f"RUN COMMAND: {cmd}  [in {cwd}]"
     return f"{tool}({json.dumps(args, ensure_ascii=False)})"
 
 
-def _action_risk(tool: str) -> str:
-    # organize_* touches many files at once = medium
+def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
     if tool in ("organize_desktop_by_type", "organize_folder"):
         return "medium"
+    if tool == "run_command":
+        # Classify the command to determine risk tier
+        if args:
+            from shell_guard import classify_command, get_extra_allowlist
+            verdict = classify_command(args.get("command", ""), get_extra_allowlist())
+            if verdict.tier == "risky":
+                return "high"
+            return "medium"  # safe-tier shell commands are still medium risk
+        return "high"
     return "low"
 
 
@@ -107,6 +127,7 @@ def _build_summary(actions: list[PlannedAction]) -> str:
     move_count = sum(1 for a in actions if a.tool_name in ("move_file", "rename_file"))
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
     org_count = sum(1 for a in actions if a.tool_name in ("organize_desktop_by_type", "organize_folder"))
+    cmd_count = sum(1 for a in actions if a.tool_name == "run_command")
 
     parts: list[str] = []
     if move_count:
@@ -115,6 +136,8 @@ def _build_summary(actions: list[PlannedAction]) -> str:
         parts.append(f"{folder_count} folder(s) to create")
     if org_count:
         parts.append(f"{org_count} organize operation(s)")
+    if cmd_count:
+        parts.append(f"{cmd_count} shell command(s)")
     return ", ".join(parts) if parts else "action(s) pending"
 
 

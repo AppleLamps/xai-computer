@@ -71,6 +71,8 @@ _BTN_SIDE_BG = "#dcdcdc"
 _SEP_COLOR = "#c8c8c8"
 _TURN_SEP_COLOR = "#e0e0e0"
 _APPROVAL_BORDER = "#ef6c00"
+_APPROVAL_BORDER_HIGH = "#b71c1c"
+_FG_RISK_HIGH = "#b71c1c"
 _BUSY_COLOR = "#ef6c00"
 
 
@@ -593,7 +595,12 @@ class AssistantApp:
             w.destroy()
 
         dry_tag = "  [DRY RUN]" if card.dry_run else ""
+        is_high = card.risk_level == "high"
         is_medium = card.risk_level == "medium"
+
+        # Set border color by risk level
+        border_color = _APPROVAL_BORDER_HIGH if is_high else _APPROVAL_BORDER
+        self._approval_outer.config(bg=border_color)
 
         # Title row
         title_frame = tk.Frame(inner, bg=_BG_APPROVAL)
@@ -604,12 +611,30 @@ class AssistantApp:
             font=self._f_approval_title, bg=_BG_APPROVAL, fg=_FG,
         ).pack(side=tk.LEFT)
 
-        risk_fg = _FG_RISK_MED if is_medium else _FG_RISK_LOW
-        risk_text = "MEDIUM" if is_medium else "LOW"
+        if is_high:
+            risk_fg = _FG_RISK_HIGH
+            risk_text = "HIGH"
+        elif is_medium:
+            risk_fg = _FG_RISK_MED
+            risk_text = "MEDIUM"
+        else:
+            risk_fg = _FG_RISK_LOW
+            risk_text = "LOW"
         tk.Label(
             title_frame, text=f"Risk: {risk_text}",
             font=self._f_ui_sm_bold, bg=_BG_APPROVAL, fg=risk_fg,
         ).pack(side=tk.RIGHT)
+
+        # Extra warnings for shell commands
+        has_shell = any(a.tool_name == "run_command" for a in card.actions)
+        if has_shell:
+            warn_frame = tk.Frame(inner, bg=_BG_APPROVAL)
+            warn_frame.pack(fill=tk.X, pady=(2, 0))
+            tk.Label(
+                warn_frame,
+                text="Shell command — not undoable. Output redacted for secrets.",
+                font=self._f_ui_sm, bg=_BG_APPROVAL, fg=risk_fg,
+            ).pack(anchor=tk.W)
 
         # Scope + summary
         meta_parts: list[str] = []
@@ -667,8 +692,15 @@ class AssistantApp:
             row = tk.Frame(actions_frame, bg=_BG_APPROVAL)
             row.pack(fill=tk.X, pady=1)
 
-            marker_fg = _FG_RISK_MED if action.risk == "medium" else _FG
-            marker = " [!]" if action.risk == "medium" else ""
+            if action.risk == "high":
+                marker_fg = _FG_RISK_HIGH
+                marker = " [!!]"
+            elif action.risk == "medium":
+                marker_fg = _FG_RISK_MED
+                marker = " [!]"
+            else:
+                marker_fg = _FG
+                marker = ""
 
             num_lbl = tk.Label(
                 row, text=f"{action.index}.", font=self._f_ui_sm_bold,

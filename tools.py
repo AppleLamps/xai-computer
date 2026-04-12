@@ -1,14 +1,17 @@
-"""Vetted local filesystem and desktop helpers (no shell execution).
+"""Vetted local filesystem, desktop, and constrained shell helpers.
 
 All mutating operations record undo entries when not in dry-run mode.
 Read-only analysis tools are safe and never modify the filesystem.
+Shell execution goes through shell_guard.py for deterministic classification.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
+import subprocess
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -22,6 +25,13 @@ from safety import (
     is_system_or_protected_name,
     require_allowed_path,
     require_allowed_path_readonly,
+)
+from shell_guard import (
+    classify_command,
+    get_extra_allowlist,
+    redact_secrets,
+    truncate_output,
+    validate_working_dir,
 )
 from undo import record_create_folder, record_move, record_organize_move, record_rename
 
@@ -749,6 +759,119 @@ def open_url(url: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Shell execution (constrained — see shell_guard.py)
+# ---------------------------------------------------------------------------
+
+_SHELL_TIMEOUT = 30
+
+
+def run_command(command: str, working_dir: str | None = None) -> dict[str, Any]:
+    """Run a shell command after deterministic safety classification.
+
+    Every command passes through shell_guard.classify_command() BEFORE execution.
+    BLOCKED commands are rejected unconditionally — no user override.
+    SAFE and RISKY commands require user confirmation (handled by core.py).
+    This tool is NOT undoable — shell side effects cannot be reliably reversed.
+    shell=True is NEVER used.
+    """
+    # Classify
+    verdict = classify_command(command, extra_allowlist=get_extra_allowlist())
+
+    # BLOCKED — reject immediately, no confirmation, no execution
+    if verdict.tier == "blocked":
+        log_event("run_command_blocked", {
+            "command": verdict.command,
+            "executable": verdict.executable,
+            "reason": verdict.reason,
+        }, phase="blocked")
+        return {
+            "ok": False,
+            "blocked": True,
+            "error": f"Command blocked: {verdict.reason}",
+            "command": verdict.command,
+            "tier": "blocked",
+        }
+
+    # Validate working directory
+    try:
+        cwd = validate_working_dir(working_dir)
+    except (PermissionError, ValueError, OSError) as e:
+        return {"ok": False, "error": str(e)}
+
+    # Dry-run: simulate only
+    if is_dry_run():
+        log_event("run_command", {
+            "command": verdict.command,
+            "working_dir": str(cwd),
+            "tier": verdict.tier,
+        }, phase="dry_run")
+        return {
+            "ok": True,
+            "dry_run": True,
+            "command": verdict.command,
+            "working_dir": str(cwd),
+            "tier": verdict.tier,
+        }
+
+    # Execute with shell=False
+    try:
+        tokens = shlex.split(verdict.command, posix=False)
+    except ValueError as e:
+        return {"ok": False, "error": f"Failed to parse command: {e}"}
+
+    try:
+        result = subprocess.run(
+            tokens,
+            capture_output=True,
+            text=True,
+            timeout=_SHELL_TIMEOUT,
+            cwd=str(cwd),
+            shell=False,  # NEVER shell=True
+        )
+    except subprocess.TimeoutExpired:
+        log_event("run_command_timeout", {
+            "command": verdict.command,
+            "timeout": _SHELL_TIMEOUT,
+        }, phase="error")
+        return {"ok": False, "error": f"Command timed out after {_SHELL_TIMEOUT}s."}
+    except FileNotFoundError:
+        return {"ok": False, "error": f"Executable not found: {verdict.executable}"}
+    except OSError as e:
+        return {"ok": False, "error": f"Failed to run command: {e}"}
+
+    # Process output
+    stdout_raw = result.stdout or ""
+    stderr_raw = result.stderr or ""
+
+    stdout_redacted = redact_secrets(stdout_raw)
+    stderr_redacted = redact_secrets(stderr_raw)
+
+    stdout_final, stdout_truncated = truncate_output(stdout_redacted)
+    stderr_final, stderr_truncated = truncate_output(stderr_redacted)
+
+    log_event("run_command", {
+        "command": verdict.command,
+        "working_dir": str(cwd),
+        "tier": verdict.tier,
+        "exit_code": result.returncode,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }, phase="executed")
+
+    return {
+        "ok": result.returncode == 0,
+        "command": verdict.command,
+        "working_dir": str(cwd),
+        "tier": verdict.tier,
+        "exit_code": result.returncode,
+        "stdout": stdout_final,
+        "stderr": stderr_final,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -772,6 +895,8 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "create_folder": lambda **a: create_folder(a["path"]),
         "organize_desktop_by_type": lambda **a: organize_desktop_by_type(a.get("desktop_path")),
         "organize_folder": lambda **a: organize_folder(a["path"], a.get("mode", "type")),
+        # Shell (constrained)
+        "run_command": lambda **a: run_command(a["command"], a.get("working_dir")),
         # Browser
         "open_url": lambda **a: open_url(a["url"]),
     }

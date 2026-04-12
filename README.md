@@ -12,13 +12,14 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 - **Show recent or largest files** — quick answers about what's taking up space
 - **Read small text files** — peek at file contents (capped at 100 KB)
 - **Create folders** — with undo support
+- **Run shell commands** — constrained by a deterministic allowlist; dangerous patterns blocked unconditionally; all commands require confirmation
 - **Open URLs** — launches your default browser
 - **Web search** — optional xAI-backed web search if configured and supported by the model
 
 ## What It Cannot Do
 
 - **Delete files or folders** — no delete tool exists
-- **Execute shell commands** — no PowerShell, CMD, or subprocess calls
+- **Run arbitrary shell commands** — only allowlisted or confirmed commands run; dangerous patterns (rm, del, format, pipe-to-shell, etc.) are blocked unconditionally and cannot be overridden, even by user approval
 - **Run model-generated code** — the model's output is never evaluated as code
 - **Access files outside allowed roots** — mutations are restricted to configured directories
 - **Silently overwrite files** — collisions get `_dup1`, `_dup2`, etc. suffixes
@@ -43,6 +44,8 @@ The assistant enforces multiple safety layers:
 **Hidden and system files.** Desktop organization skips dotfiles (`.gitignore`, `.env`), Office lock files (`~$*.docx`), and known system files (`desktop.ini`, `Thumbs.db`, `NTUSER.DAT`).
 
 **Read limits.** `read_text_file` caps at 100 KB of content and refuses files over 10 MB. `directory_tree` caps at depth 5 and 200 entries.
+
+**Shell execution.** Commands go through a deterministic four-tier classifier (`shell_guard.py`). Dangerous commands are blocked unconditionally — no user override. Safe commands require confirmation. Unknown commands require confirmation with a HIGH-risk warning. `shell=True` is never used. Output is redacted for secrets and truncated to 200 lines. Shell commands are not undoable. See [`docs/SHELL_SAFETY.md`](docs/SHELL_SAFETY.md).
 
 ## Architecture Overview
 
@@ -83,9 +86,10 @@ app.py             CLI entry point
 gui.py             GUI entry point (Tkinter)
 cli.py             Terminal I/O, slash commands, approval rendering
 core.py            Conversation loop, tool dispatch, ApprovalCard
-tools.py           16 local tools (filesystem, analysis, browser)
+tools.py           17 local tools (filesystem, analysis, shell, browser)
 schemas.py         System prompt and tool JSON schemas for the API
 safety.py          Path allowlisting, traversal protection, confirmation parsing
+shell_guard.py     Deterministic shell command classifier (blocklist + allowlist)
 config.py          .env loading, model presets, runtime state
 logger.py          Append-only JSONL logging with session tracking
 undo.py            Undo stack (record, reverse, history)
@@ -93,7 +97,7 @@ xai_client.py      Minimal HTTPS client for xAI chat completions
 pyproject.toml     Pytest configuration
 requirements.txt   Runtime dependency (python-dotenv)
 .env.example       Template for environment variables
-tests/             121 tests (safety, tools, undo, config, core)
+tests/             188 tests (safety, tools, shell guard, undo, config, core)
 logs/              Runtime action logs (created automatically)
 state/             Undo history (created automatically)
 docs/              Architecture and reference documentation
@@ -145,6 +149,7 @@ All configuration is through environment variables in `.env`.
 | `XAI_ASSISTANT_DESKTOP` | *(auto-detected)* | Override desktop path (useful for OneDrive redirection) |
 | `XAI_ENABLE_WEB_SEARCH` | `0` | Set to `1` to enable xAI built-in web search |
 | `XAI_MAX_TOOL_LOOPS` | `12` | Max tool-call round-trips per user turn (1-50) |
+| `XAI_SHELL_ALLOWLIST_EXTRA` | *(empty)* | Comma-separated commands to add to the SAFE shell tier |
 
 **Model presets** (switchable at runtime with `/model`):
 
@@ -203,6 +208,7 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `create_folder` | Create a folder and any missing parents |
 | `organize_desktop_by_type` | Sort desktop files into category subfolders |
 | `organize_folder` | Sort any allowed folder by type, month, or year |
+| `run_command` | Run a constrained shell command (see [Shell Safety](docs/SHELL_SAFETY.md)) |
 
 ### Browser
 
@@ -308,7 +314,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **121 tests passing** across 5 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
+Current status: **188 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
 
 ## Troubleshooting
 

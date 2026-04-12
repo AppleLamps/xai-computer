@@ -32,11 +32,15 @@ Minimal HTTPS client for the xAI chat completions endpoint. Uses only `urllib` f
 
 ### `schemas.py` — Tool definitions
 
-Contains the system prompt and all 16 tool JSON schemas sent to the API. Also defines `MUTATING_TOOL_NAMES` — the set of tools that require confirmation.
+Contains the system prompt and all 17 tool JSON schemas sent to the API. Also defines `MUTATING_TOOL_NAMES` — the set of tools that require confirmation.
 
 ### `tools.py` — Local tool implementations
 
-All filesystem and browser operations. Each tool is a plain function that returns a `dict[str, Any]` result. Mutating tools check `is_dry_run()` before executing and record undo entries via `undo.py`. The `dispatch_tool()` function maps tool names to handlers.
+All filesystem, shell, and browser operations. Each tool is a plain function that returns a `dict[str, Any]` result. Mutating tools check `is_dry_run()` before executing and record undo entries via `undo.py` (except `run_command`, which is not undoable). The `dispatch_tool()` function maps tool names to handlers.
+
+### `shell_guard.py` — Shell command safety gate
+
+Deterministic classifier for shell commands. Every proposed command is classified into `blocked`, `safe`, or `risky` using static rules only — no LLM inference. Blocked commands are rejected unconditionally. Also handles working directory validation, output truncation, and secret redaction. See [`docs/SHELL_SAFETY.md`](SHELL_SAFETY.md) for the full safety model.
 
 ### `safety.py` — Path validation
 

@@ -102,7 +102,7 @@ xai_client.py      Minimal HTTPS client for xAI chat completions
 pyproject.toml     Pytest configuration
 requirements.txt   Runtime dependency (python-dotenv)
 .env.example       Template for environment variables
-tests/             215 tests (safety, tools, write_file, shell guard, structured output, undo, config, core)
+tests/             250 tests
 logs/              Runtime action logs (created automatically)
 state/             Undo history (created automatically)
 docs/              Architecture and reference documentation
@@ -154,6 +154,7 @@ All configuration is through environment variables in `.env`.
 | `XAI_ASSISTANT_DESKTOP` | *(auto-detected)* | Override desktop path (useful for OneDrive redirection) |
 | `XAI_ENABLE_WEB_SEARCH` | `0` | Set to `1` to enable xAI built-in web search |
 | `XAI_MAX_TOOL_LOOPS` | `12` | Max tool-call round-trips per user turn (1-50) |
+| `XAI_CODING_MODEL` | *(not set)* | Auto-switch to this model for coding tasks (e.g., `grok-code-fast-1`) |
 | `XAI_SHELL_ALLOWLIST_EXTRA` | *(empty)* | Comma-separated commands to add to the SAFE shell tier |
 
 **Model presets** (switchable at runtime with `/model`):
@@ -311,7 +312,7 @@ You: write a Python script that converts CSV to JSON, save it to my Desktop
 You: read main.py and add error handling, then write it back
 ```
 
-Use `/model code` for the fastest, cheapest code generation.
+Use `/model code` for the fastest, cheapest code generation, or set `XAI_CODING_MODEL=grok-code-fast-1` in `.env` to auto-route coding requests to that model. When auto-routing is enabled, the app detects coding intent (keywords like "write a", "build a website", file extensions like `.py` or `.html`) and switches to the coding model for that turn only, then switches back. Auto-routing is skipped if you've manually selected a model with `/model`.
 
 **Limitations:**
 - No live preview server (write files, then open in browser manually)
@@ -349,7 +350,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **215 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
+Current status: **250 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
 
 ## Troubleshooting
 

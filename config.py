@@ -24,6 +24,7 @@ MODELS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _runtime_model: str | None = None
+_user_set_model: bool = False  # True if user explicitly chose a model via /model
 _dry_run: bool = False
 _verbose: bool = True  # True = verbose (default), False = concise
 _last_working_folder: Path | None = None
@@ -38,13 +39,20 @@ def is_dry_run() -> bool:
     return _dry_run
 
 
-def set_runtime_model(model: str) -> None:
-    global _runtime_model
+def set_runtime_model(model: str, *, user_initiated: bool = True) -> None:
+    global _runtime_model, _user_set_model
     _runtime_model = model
+    if user_initiated:
+        _user_set_model = True
 
 
 def get_runtime_model_override() -> str | None:
     return _runtime_model
+
+
+def user_has_set_model() -> bool:
+    """True if the user explicitly chose a model this session (via /model)."""
+    return _user_set_model
 
 
 def set_verbose(enabled: bool) -> None:
@@ -142,6 +150,12 @@ def get_xai_model() -> str:
     if override:
         return override
     return os.environ.get("XAI_MODEL", MODELS["fast"])
+
+
+def get_coding_model() -> str | None:
+    """Return the coding model ID from XAI_CODING_MODEL, or None if not configured."""
+    raw = os.environ.get("XAI_CODING_MODEL", "").strip()
+    return raw if raw else None
 
 
 def get_max_tool_loops() -> int:

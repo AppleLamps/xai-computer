@@ -105,8 +105,11 @@ def _handle_status(sink: TerminalSink) -> None:
     mode_label = "verbose" if info["verbose"] else "concise"
     lwf = get_last_working_folder()
     lwf_label = str(lwf) if lwf else "(none)"
+    cm = info.get("coding_model")
+    cm_label = f"{cm} (auto-routing enabled)" if cm else "not configured"
     sink.info(f"\n  Session:          {SESSION_ID}")
     sink.info(f"  Model:            {info['model']}")
+    sink.info(f"  Coding model:     {cm_label}")
     sink.info(f"  Output mode:      {mode_label}")
     sink.info(f"  Dry run:          {dry_label}")
     sink.info(f"  Web search:       {web_label}")

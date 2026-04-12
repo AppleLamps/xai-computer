@@ -14,12 +14,15 @@ from typing import Any, Protocol
 
 from config import (
     get_allowed_roots,
+    get_coding_model,
     get_default_desktop_path,
     get_max_tool_loops,
     get_xai_api_key,
     get_xai_model,
     is_dry_run,
     is_verbose,
+    set_runtime_model,
+    user_has_set_model,
     web_search_enabled,
 )
 from logger import log_event
@@ -393,6 +396,35 @@ def _try_structured_summary(block: list[ToolCallSpec], executed: int) -> str | N
 
 
 # ---------------------------------------------------------------------------
+# Coding model auto-routing
+# ---------------------------------------------------------------------------
+
+_CODING_PHRASES: list[str] = [
+    "write a ", "write the ", "write an ", "write me ",
+    "build a ", "build me ", "build the ",
+    "create a script", "create a file", "create a webpage", "create a website",
+    "generate html", "generate css", "generate javascript", "generate python",
+    "generate a ", "generate the ",
+    "code a ", "code the ",
+    "make a website", "make a script", "make a page", "make a webpage",
+    "scaffold",
+]
+_CODING_EXTENSIONS: list[str] = [".html", ".css", ".js", ".py", ".ts", ".jsx", ".tsx"]
+
+
+def _detect_coding_intent(message: str) -> bool:
+    """Deterministic check for coding-related user messages. No LLM, no ML."""
+    lower = message.casefold()
+    for phrase in _CODING_PHRASES:
+        if phrase in lower:
+            return True
+    for ext in _CODING_EXTENSIONS:
+        if ext in lower:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Public conversation driver
 # ---------------------------------------------------------------------------
 
@@ -408,6 +440,36 @@ def handle_user_turn(
         sink.error("Missing XAI_API_KEY.")
         return
 
+    # Auto-route to coding model if configured and applicable
+    coding_model = get_coding_model()
+    routed = False
+    saved_model: str | None = None
+
+    if (
+        coding_model
+        and not user_has_set_model()
+        and _detect_coding_intent(user_text)
+    ):
+        saved_model = get_xai_model()
+        set_runtime_model(coding_model, user_initiated=False)
+        routed = True
+        sink.info(f"Using coding model ({coding_model}) for this request.")
+        log_event("coding_model_routed", {"coding_model": coding_model})
+
+    try:
+        _run_turn(messages, user_text, sink)
+    finally:
+        if routed and saved_model is not None:
+            set_runtime_model(saved_model, user_initiated=False)
+
+
+def _run_turn(
+    messages: list[dict[str, Any]],
+    user_text: str,
+    sink: OutputSink,
+) -> None:
+    """Inner turn logic — separated so handle_user_turn can wrap with model routing."""
+    api_key = get_xai_api_key()
     model = get_xai_model()
     tools = get_tool_definitions()
 
@@ -445,6 +507,7 @@ def get_startup_info() -> dict[str, Any]:
     """Return info dict for startup display."""
     return {
         "model": get_xai_model(),
+        "coding_model": get_coding_model(),
         "desktop": str(get_default_desktop_path()),
         "allowed_roots": [str(p) for p in get_allowed_roots()],
         "dry_run": is_dry_run(),

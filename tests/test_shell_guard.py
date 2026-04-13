@@ -158,6 +158,12 @@ class TestRisky:
         "dotnet run",
         "make all",
         "java -version",
+        "python -c \"print(1)\"",
+        "node app.js",
+        "npm install",
+        "git show HEAD~1",
+        "ipconfig /release",
+        "date 01-01-2030",
     ])
     def test_risky_commands(self, cmd: str) -> None:
         v = classify_command(cmd)

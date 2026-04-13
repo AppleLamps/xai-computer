@@ -10,10 +10,11 @@ from core import (
     _action_label,
     _action_risk,
     _process_tool_calls,
+    _run_turn,
     _tool_progress_label,
     build_approval_card,
 )
-from xai_client import ToolCallSpec
+from xai_client import ChatCompletionResult, ToolCallSpec
 
 
 class TestPlannedAction:
@@ -35,6 +36,9 @@ class TestPlannedAction:
     def test_risk_move_is_low(self) -> None:
         assert _action_risk("move_file") == "low"
         assert _action_risk("create_folder") == "low"
+
+    def test_risk_desktop_click_is_high(self) -> None:
+        assert _action_risk("click", {"x": 1, "y": 2}) == "high"
 
 
 class TestApprovalCard:
@@ -61,6 +65,16 @@ class TestApprovalCard:
         assert len(card.actions) == 0
         assert card.summary == "action(s) pending"
 
+    def test_browser_actions_batch_summary(self) -> None:
+        tcs = [
+            ToolCallSpec(id="1", name="browser_click", arguments={"selector": "#go"}),
+            ToolCallSpec(id="2", name="browser_fill", arguments={"selector": "#q", "text": "hello"}),
+        ]
+        card = build_approval_card(tcs)
+        assert card.action_class == "browser_control"
+        assert "browser action" in card.summary
+        assert card.risk_level == "high"
+
 
 class TestToolProgressLabel:
     def test_list_directory(self) -> None:
@@ -80,6 +94,10 @@ class TestToolProgressLabel:
     def test_unknown_tool(self) -> None:
         label = _tool_progress_label("some_future_tool", {"x": 1})
         assert "Running some_future_tool" in label
+
+    def test_screenshot_label(self) -> None:
+        label = _tool_progress_label("take_screenshot", {})
+        assert "Capturing screenshot" in label
 
 
 class TestProcessToolCallsConversation:
@@ -134,6 +152,118 @@ class TestProcessToolCallsConversation:
         # assistant() should NOT have been called by _process_tool_calls
         # (that responsibility is in _run_turn, not here)
         sink.assistant.assert_not_called()
+
+    def test_blocked_run_command_skips_approval(self) -> None:
+        """Permanently blocked shell commands should never render an approval card."""
+        sink = self._make_sink()
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="c1", name="run_command", arguments={"command": "rm -rf /"}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        sink.plan.assert_not_called()
+        sink.prompt_confirmation.assert_not_called()
+        tool_msg = next(m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "c1")
+        import json
+        content = json.loads(tool_msg["content"])
+        assert content.get("blocked") is True
+
+    @patch("core.dispatch_tool")
+    def test_blocked_run_command_splits_mutating_batch(self, mock_dispatch: MagicMock) -> None:
+        """A blocked shell command should not be bundled into adjacent approval blocks."""
+        def side_effect(name: str, args: dict) -> dict:
+            if name == "run_command":
+                return {"ok": False, "blocked": True, "error": "Command blocked"}
+            return {"ok": True}
+
+        mock_dispatch.side_effect = side_effect
+        sink = self._make_sink()
+        sink.prompt_confirmation.side_effect = ["yes", "yes"]
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="m1", name="move_file", arguments={"source": "a.txt", "destination": "b.txt"}),
+            ToolCallSpec(id="c1", name="run_command", arguments={"command": "rm -rf /"}),
+            ToolCallSpec(id="f1", name="create_folder", arguments={"path": "/new"}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        assert sink.plan.call_count == 2
+        assert sink.prompt_confirmation.call_count == 2
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    def test_batches_by_action_class(self, mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        sink.prompt_confirmation.side_effect = ["yes", "yes"]
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="b1", name="browser_navigate", arguments={"url": "https://example.com"}),
+            ToolCallSpec(id="b2", name="browser_click", arguments={"selector": "#go"}),
+            ToolCallSpec(id="f1", name="append_file", arguments={"path": "C:/tmp/out.txt", "content": "x"}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        assert sink.plan.call_count == 2
+
+    def test_blocked_hotkey_skips_approval(self) -> None:
+        sink = self._make_sink()
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="hk1", name="press_hotkey", arguments={"keys": ["alt", "f4"]}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        sink.plan.assert_not_called()
+        sink.prompt_confirmation.assert_not_called()
+        tool_msg = next(m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "hk1")
+        import json
+        content = json.loads(tool_msg["content"])
+        assert content.get("blocked") is True
+
+
+class TestRunTurnRollback:
+    def _make_sink(self) -> MagicMock:
+        sink = MagicMock()
+        sink.info = MagicMock()
+        sink.error = MagicMock()
+        sink.assistant = MagicMock()
+        sink.plan = MagicMock()
+        sink.progress = MagicMock()
+        sink.prompt_confirmation = MagicMock(return_value="yes")
+        return sink
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=3)
+    @patch("core._chat_with_optional_web_tools")
+    def test_api_failure_rolls_back_partial_turn(
+        self,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+        mock_dispatch: MagicMock,
+    ) -> None:
+        """A failed turn should discard the user message and any partial tool history."""
+        first = ChatCompletionResult(
+            message_role="assistant",
+            content="I'll inspect that.",
+            tool_calls=[ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/tmp"})],
+            raw={},
+        )
+
+        def side_effect(*args: object, **kwargs: object) -> ChatCompletionResult:
+            if mock_chat.call_count == 1:
+                return first
+            raise RuntimeError("network down")
+
+        mock_chat.side_effect = side_effect
+        sink = self._make_sink()
+        messages = [{"role": "assistant", "content": "previous"}]
+
+        _run_turn(messages, "show me a folder", sink)
+
+        assert messages == [{"role": "assistant", "content": "previous"}]
+        sink.error.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

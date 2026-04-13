@@ -1,6 +1,6 @@
 # xai-computer
 
-A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. You chat in a terminal; Grok decides which tools to call; the app runs them locally after you approve. There is no shell execution, no model-generated code execution, and no file deletion.
+A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. You chat in a terminal; Grok decides which tools to call; the app runs them locally after you approve. There is no shell execution of model-generated code, no file deletion, and no unconfirmed mutations.
 
 ## What It Can Do
 
@@ -12,11 +12,19 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 - **Organize folders** — by file type, by month, or by year (desktop or any allowed folder)
 - **Show recent or largest files** — quick answers about what's taking up space
 - **Read small text files** — peek at file contents (capped at 100 KB)
+- **Read specific line ranges** — read a precise slice of any text file by line number
 - **Write files** — create or update text/code files within allowed folders, with backup on overwrite and undo support
+- **Edit files precisely** — replace literal text, append content, or apply unified diffs, all with backup and undo
 - **Create folders** — with undo support
 - **Run shell commands** — constrained by a deterministic allowlist; dangerous patterns blocked unconditionally; all commands require confirmation
 - **Open URLs** — launches your default browser
 - **Web search** — optional xAI-backed web search if configured and supported by the model
+- **Take screenshots** — full desktop or a specific screen region, saved as PNG
+- **OCR images** — extract text and bounding boxes from screenshots or image files
+- **Control the desktop** — move the mouse, click, scroll, type text, press hotkeys (dangerous combinations blocked)
+- **Manage windows** — list open windows, get the active window, focus a window by ID, wait for a window to appear
+- **Manage processes** — list running processes, start executables, stop processes by PID, wait for a process to exit
+- **Automate the browser** — full Playwright session: navigate, click selectors, fill forms, press keys, extract page text, download files, wait for elements
 
 ## What It Cannot Do
 
@@ -26,8 +34,8 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 - **Access files outside allowed roots** — mutations are restricted to configured directories
 - **Silently overwrite files** — collisions get `_dup1`, `_dup2`, etc. suffixes
 - **Operate autonomously** — every mutating action requires explicit approval
-- **Automate the browser** — it can open a URL, not click or fill forms
 - **Run as a background service** — it is an interactive terminal session
+- **Press dangerous hotkeys** — Alt+F4, Win+R, Ctrl+Alt+Del, Win+X, Win+L are blocked unconditionally
 
 ## Safety Model
 
@@ -37,17 +45,21 @@ The assistant enforces multiple safety layers:
 
 **Path validation.** All paths are normalized and resolved before any operation. Path traversal (`..`) is rejected before resolution. Dangerous system locations (Windows, System32, Program Files, ProgramData, $Recycle.Bin) are blocked even if they somehow fall inside an allowed root.
 
-**Approval before mutation.** Every mutating tool call is batched and shown in a structured approval card with a risk level (LOW or MEDIUM) before execution. You must type `yes` or `confirm` — anything else cancels. Ambiguous text is never treated as approval.
+**Approval before mutation.** Every mutating tool call is batched and shown in a structured approval card with a risk level (LOW, MEDIUM, or HIGH) before execution. You must type `yes` or `confirm` — anything else cancels. Ambiguous text is never treated as approval.
 
 **Dry-run mode.** Toggle with `/dry-on`. Mutating actions simulate without touching the filesystem. Output is labeled `[DRY RUN]`.
 
-**Undo.** Moves, renames, and folder creations are recorded in `state/undo_history.jsonl`. Undo moves files back to their original location; if that location is occupied, the file is restored with a `_restored1` suffix. Empty folders created by the app can be undone. Undo never overwrites existing files and never deletes non-empty folders. Undo is scoped to the current session.
+**Undo.** Moves, renames, folder creations, and file writes are recorded in `state/undo_history.jsonl`. Undo moves files back to their original location; if that location is occupied, the file is restored with a `_restored1` suffix. Empty folders created by the app can be undone. Undo never overwrites existing files and never deletes non-empty folders. Undo is scoped to the current session.
 
 **Hidden and system files.** Desktop organization skips dotfiles (`.gitignore`, `.env`), Office lock files (`~$*.docx`), and known system files (`desktop.ini`, `Thumbs.db`, `NTUSER.DAT`).
 
 **Read limits.** `read_text_file` caps at 100 KB of content and refuses files over 10 MB. `directory_tree` caps at depth 5 and 200 entries.
 
 **Shell execution.** Commands go through a deterministic four-tier classifier (`shell_guard.py`). Dangerous commands are blocked unconditionally — no user override. Safe commands require confirmation. Unknown commands require confirmation with a HIGH-risk warning. `shell=True` is never used. Output is redacted for secrets and truncated to 200 lines. Shell commands are not undoable. See [`docs/SHELL_SAFETY.md`](docs/SHELL_SAFETY.md).
+
+**Hotkey blocking.** `press_hotkey` rejects a fixed blocklist (Alt+F4, Win+R, Ctrl+Alt+Del, Win+X, Win+L) unconditionally before the approval card is shown.
+
+**Browser isolation.** The Playwright browser session runs headfully (visible window). Downloads land in `state/browser_downloads/<session-id>/`. The model cannot navigate to `file://` paths or bypass the approval card for mutating browser actions.
 
 ## Architecture Overview
 
@@ -91,27 +103,31 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details on each module.
 ## Project Structure
 
 ```
-app.py             CLI entry point
-gui.py             GUI entry point (Tkinter)
-cli.py             Terminal I/O, slash commands, approval rendering
-core.py            Conversation loop, tool dispatch, ApprovalCard
-tools.py           18 local tools (filesystem, analysis, write, shell, browser)
-schemas.py         System prompt and tool JSON schemas for the API
-safety.py          Path allowlisting, traversal protection, confirmation parsing
-shell_guard.py     Deterministic shell command classifier (blocklist + allowlist)
+app.py                CLI entry point
+gui.py                GUI entry point (Tkinter)
+cli.py                Terminal I/O, slash commands, approval rendering
+core.py               Conversation loop, tool dispatch, ApprovalCard
+tools.py              Filesystem, analysis, shell, and browser-open tools
+browser_tools.py      Playwright browser automation (navigate, click, fill, download, OCR)
+desktop_tools.py      Screenshot, OCR, window management, mouse/keyboard control
+editor_tools.py       Precise file editing (replace, append, patch, read range)
+process_tools.py      Process management (list, start, stop, wait)
+schemas.py            System prompt and tool JSON schemas for the API
+safety.py             Path allowlisting, traversal protection, confirmation parsing
+shell_guard.py        Deterministic shell command classifier (blocklist + allowlist)
 structured_models.py  Pydantic models for structured output responses
-xai_structured.py  xAI SDK wrapper for structured output calls (chat.parse)
-config.py          .env loading, model presets, runtime state
-logger.py          Append-only JSONL logging with session tracking
-undo.py            Undo stack (record, reverse, history)
-xai_client.py      Minimal HTTPS client for xAI chat completions
-pyproject.toml     Pytest configuration
-requirements.txt   Runtime dependency (python-dotenv)
-.env.example       Template for environment variables
-tests/             250 tests
-logs/              Runtime action logs (created automatically)
-state/             Undo history (created automatically)
-docs/              Architecture and reference documentation
+xai_structured.py     xAI SDK wrapper for structured output calls (chat.parse)
+config.py             .env loading, model presets, runtime state
+logger.py             Append-only JSONL logging with session tracking
+undo.py               Undo stack (record, reverse, history)
+xai_client.py         Minimal HTTPS client for xAI chat completions
+pyproject.toml        Pytest configuration
+requirements.txt      Runtime dependencies
+.env.example          Template for environment variables
+tests/                318 tests
+logs/                 Runtime action logs (created automatically)
+state/                Undo history and browser downloads (created automatically)
+docs/                 Architecture and reference documentation
 ```
 
 ## Requirements
@@ -120,6 +136,28 @@ docs/              Architecture and reference documentation
 - Python 3.11 or later
 - An xAI API key from [console.x.ai](https://console.x.ai/)
 
+**Runtime dependencies** (installed via `pip install -r requirements.txt`):
+
+| Package | Purpose |
+|---|---|
+| `python-dotenv` | `.env` loading |
+| `xai_sdk` | Structured output calls (`chat.parse`) |
+| `pydantic` | Structured output models |
+| `send2trash` | Safe file removal (internal use) |
+| `mss` | Screenshots |
+| `Pillow` | Image cropping for OCR |
+| `pywin32` | Window enumeration and focus |
+| `pyautogui` | Mouse, keyboard, and hotkey control |
+| `psutil` | Process listing and management |
+| `playwright` | Browser automation |
+| `rapidocr-onnxruntime` | On-device OCR |
+
+After installing Python dependencies, install the Playwright browser:
+
+```powershell
+playwright install chromium
+```
+
 ## Quick Start
 
 ```powershell
@@ -127,6 +165,7 @@ cd C:\Users\lucas\Desktop\xai-computer
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+playwright install chromium
 copy .env.example .env
 ```
 
@@ -206,11 +245,23 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `largest_files` | Show the biggest files in a directory |
 | `file_type_summary` | Aggregate sizes by file extension and category |
 | `read_text_file` | Read the beginning of a text file (capped at 100 KB) |
+| `read_file_range` | Read a specific 1-based line range from a text file |
 | `search_files` | Find files by name substring (case-insensitive) |
 | `recent_files` | Most recently modified files in a directory |
 | `directory_tree` | Indented tree view (max depth 5, max 200 entries) |
 | `preview_plan_for_desktop_cleanup` | Preview how desktop files would be grouped by type |
 | `preview_organize_folder` | Preview organization of any folder (by type, month, or year) |
+| `take_screenshot` | Capture a PNG of the full desktop or a screen region |
+| `ocr_image` | Extract text and bounding boxes from an image or screenshot |
+| `list_windows` | List all visible top-level desktop windows |
+| `get_active_window` | Return the currently focused window |
+| `list_processes` | List running processes, optionally filtered by name |
+| `wait_seconds` | Pause briefly before the next step (max 60s) |
+| `wait_for_window` | Wait until a window title match appears |
+| `wait_for_file` | Wait until a file exists within allowed roots |
+| `wait_for_process_exit` | Wait until a process PID has exited |
+| `browser_extract_text` | Extract visible text from the current browser page or a CSS selector |
+| `browser_wait_for` | Wait for a CSS selector to appear on the current browser page |
 
 ### Mutating (approval required)
 
@@ -222,13 +273,29 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `organize_desktop_by_type` | Sort desktop files into category subfolders |
 | `organize_folder` | Sort any allowed folder by type, month, or year |
 | `write_file` | Create or update a text file (backup on overwrite, undo available) |
+| `replace_in_file` | Replace literal text in a file (backup and undo) |
+| `append_file` | Append text to a file, creating it if needed (backup and undo) |
+| `apply_patch` | Apply a unified diff to a file (backup and undo) |
 | `run_command` | Run a constrained shell command (see [Shell Safety](docs/SHELL_SAFETY.md)) |
+| `focus_window` | Bring a window to the foreground by window ID |
+| `start_process` | Launch an executable with optional arguments and working directory |
+| `stop_process` | Terminate or force-kill a process by PID |
+| `move_mouse` | Move the mouse to absolute screen coordinates |
+| `click` | Click at absolute screen coordinates (left/middle/right, single/double) |
+| `scroll` | Scroll the mouse wheel at the current or specified position |
+| `type_text` | Type text into the focused control |
+| `press_hotkey` | Press a key combination (dangerous combos blocked unconditionally) |
+| `browser_navigate` | Navigate the Playwright browser session to a URL |
+| `browser_click` | Click a CSS selector on the current browser page |
+| `browser_fill` | Fill a form field on the current browser page |
+| `browser_press` | Press a key on a focused element on the current browser page |
+| `browser_download` | Download a file via URL, click trigger, or both |
 
-### Browser
+### Browser (open in system browser)
 
 | Tool | What it does |
 |---|---|
-| `open_url` | Open an http(s) URL in the default browser |
+| `open_url` | Open an http(s) URL in the default system browser |
 
 ## Example Workflows
 
@@ -281,6 +348,17 @@ You: read the notes.txt on my desktop
 Assistant: [calls read_text_file, shows content up to 5000 chars]
 ```
 
+**Edit a file in place:**
+
+```
+You: change the title in index.html from "Hello" to "Welcome"
+Assistant: [calls read_text_file to confirm the current text]
+Assistant: [calls replace_in_file after your approval]
+
+You: append a footer line to README.md
+Assistant: [calls append_file after your approval]
+```
+
 **Undo a mistake:**
 
 ```
@@ -304,6 +382,35 @@ You: open perplexity.ai
 Assistant: [calls open_url with https://www.perplexity.ai]
 ```
 
+**Take a screenshot and read what's on screen:**
+
+```
+You: take a screenshot and tell me what you see
+Assistant: [calls take_screenshot, then ocr_image, reports extracted text]
+```
+
+**Control the browser:**
+
+```
+You: go to github.com and search for "playwright"
+Assistant: [calls browser_navigate to github.com]
+Assistant: [calls browser_fill on the search box, browser_press Enter — after approval]
+Assistant: [calls browser_extract_text to report results]
+```
+
+**Manage a process:**
+
+```
+You: start notepad
+Assistant: [calls start_process with executable=notepad.exe — after approval]
+
+You: what processes are running?
+Assistant: [calls list_processes, reports summary]
+
+You: stop the notepad process
+Assistant: [calls stop_process with the PID — after approval]
+```
+
 ## Coding Workflows
 
 The assistant can generate and write code files, making it useful for scaffolding projects and quick coding tasks.
@@ -311,7 +418,8 @@ The assistant can generate and write code files, making it useful for scaffoldin
 **What it can do:**
 - Generate and write HTML, CSS, JS, Python, or any text file
 - Scaffold project folder structures (create folders + write files)
-- Read existing code with `read_text_file`
+- Read existing code with `read_text_file` or `read_file_range`
+- Apply surgical edits with `replace_in_file` or `apply_patch`
 - Run tests with `run_command` (e.g., `pytest`)
 - Iterate on files: read, modify, write back with `overwrite=true`
 - Open results in the browser with `open_url`
@@ -321,6 +429,7 @@ The assistant can generate and write code files, making it useful for scaffoldin
 You: build a simple landing page in my Documents/projects/site folder
 You: write a Python script that converts CSV to JSON, save it to my Desktop
 You: read main.py and add error handling, then write it back
+You: apply this diff to config.py: [paste unified diff]
 ```
 
 Use `/model code` for the fastest, cheapest code generation, or set `XAI_CODING_MODEL=grok-code-fast-1` in `.env` to auto-route coding requests to that model. When auto-routing is enabled, the app detects coding intent (keywords like "write a", "build a website", file extensions like `.py` or `.html`) and switches to the coding model for that turn only, then switches back. Auto-routing is skipped if you've manually selected a model with `/model`.
@@ -346,7 +455,7 @@ Use `/model code` for the fastest, cheapest code generation, or set `XAI_CODING_
 **Undo** reverses the most recent action from this session:
 
 ```
-/undo            # reverse last move, rename, or folder creation
+/undo            # reverse last move, rename, folder creation, or file write
 /undo 5          # reverse the last 5 actions (stops early if nothing left)
 /history         # see all reversible actions and their status
 ```
@@ -364,7 +473,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **275 tests passing** across 7 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, batch undo (`undo_n`), collision-safe restore, API retry with exponential backoff, partial batch retry, model switching, verbose mode, session state, and approval card construction.
+Current status: **318 tests passing** across 11 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, batch undo (`undo_n`), collision-safe restore, API retry with exponential backoff, partial batch retry, model switching, verbose mode, session state, approval card construction, browser tool dispatch, desktop tool dispatch, editor tool dispatch, and process tool dispatch.
 
 ## Troubleshooting
 
@@ -387,6 +496,12 @@ Current status: **275 tests passing** across 7 test modules covering path safety
 **`pytest` not found** — Install it: `pip install pytest`. It is not a runtime dependency.
 
 **OneDrive desktop redirect** — If your Desktop folder is under OneDrive, set `XAI_ASSISTANT_DESKTOP` in `.env` to the actual path.
+
+**Browser automation not working** — Make sure Playwright's Chromium browser is installed: `playwright install chromium`. The browser window will open visibly when automation is in use.
+
+**Screenshot or OCR fails** — `mss` requires display access. `rapidocr-onnxruntime` requires ONNX Runtime. Both are installed via `requirements.txt`. If OCR is slow on first run, it is downloading model weights.
+
+**Hotkey blocked** — Alt+F4, Win+R, Ctrl+Alt+Del, Win+X, and Win+L are permanently blocked. Use the matching action (close app, run dialog, etc.) via a safer tool instead.
 
 ## Desktop GUI
 

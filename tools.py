@@ -12,12 +12,17 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import browser_tools
+import desktop_tools
+import editor_tools
+import process_tools
 from config import get_default_desktop_path, is_dry_run, set_last_working_folder
 from logger import log_event
 from safety import (
@@ -947,6 +952,140 @@ def write_file(path: str, content: str, overwrite: bool = False) -> dict[str, An
 
 
 # ---------------------------------------------------------------------------
+# Desktop, process, browser, and editor wrappers
+# ---------------------------------------------------------------------------
+
+
+def take_screenshot(region: dict[str, int] | None = None) -> dict[str, Any]:
+    return desktop_tools.take_screenshot(region)
+
+
+def ocr_image(path: str, region: dict[str, int] | None = None) -> dict[str, Any]:
+    return desktop_tools.ocr_image(path, region)
+
+
+def list_windows() -> dict[str, Any]:
+    return desktop_tools.list_windows()
+
+
+def get_active_window() -> dict[str, Any]:
+    return desktop_tools.get_active_window()
+
+
+def focus_window(window_id: int) -> dict[str, Any]:
+    return desktop_tools.focus_window(window_id)
+
+
+def move_mouse(x: int, y: int, duration_ms: int = 0) -> dict[str, Any]:
+    return desktop_tools.move_mouse(x, y, duration_ms)
+
+
+def click(x: int, y: int, button: str = "left", clicks: int = 1) -> dict[str, Any]:
+    return desktop_tools.click(x, y, button, clicks)
+
+
+def scroll(amount: int, x: int | None = None, y: int | None = None) -> dict[str, Any]:
+    return desktop_tools.scroll(amount, x, y)
+
+
+def type_text(text: str) -> dict[str, Any]:
+    return desktop_tools.type_text(text)
+
+
+def press_hotkey(keys: list[str]) -> dict[str, Any]:
+    return desktop_tools.press_hotkey(keys)
+
+
+def list_processes(query: str | None = None, limit: int = 25) -> dict[str, Any]:
+    return process_tools.list_processes(query, limit)
+
+
+def start_process(executable: str, args: list[str] | None = None, working_dir: str | None = None) -> dict[str, Any]:
+    return process_tools.start_process(executable, args, working_dir)
+
+
+def stop_process(pid: int, force: bool = False) -> dict[str, Any]:
+    return process_tools.stop_process(pid, force)
+
+
+def wait_seconds(seconds: float) -> dict[str, Any]:
+    seconds = max(0.0, min(float(seconds), 60.0))
+    if is_dry_run():
+        return {"ok": True, "dry_run": True, "seconds": seconds}
+    time.sleep(seconds)
+    return {"ok": True, "seconds": seconds}
+
+
+def wait_for_window(title_query: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return desktop_tools.wait_for_window(title_query, timeout_sec)
+
+
+def wait_for_file(path: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    deadline = time.time() + max(0.1, timeout_sec)
+    try:
+        target = require_allowed_path_readonly(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    while time.time() < deadline:
+        if target.exists():
+            return {"ok": True, "path": str(target), "exists": True}
+        time.sleep(0.1)
+    return {"ok": False, "error": f"File not found within {timeout_sec}s: {target}"}
+
+
+def wait_for_process_exit(pid: int, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return process_tools.wait_for_process_exit(pid, timeout_sec)
+
+
+def browser_navigate(url: str) -> dict[str, Any]:
+    return browser_tools.browser_navigate(url)
+
+
+def browser_click(selector: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return browser_tools.browser_click(selector, timeout_sec)
+
+
+def browser_fill(selector: str, text: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return browser_tools.browser_fill(selector, text, timeout_sec)
+
+
+def browser_press(selector: str, key: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return browser_tools.browser_press(selector, key, timeout_sec)
+
+
+def browser_download(
+    url: str | None = None,
+    click_selector: str | None = None,
+    timeout_sec: float = 10.0,
+) -> dict[str, Any]:
+    return browser_tools.browser_download(url, click_selector, timeout_sec)
+
+
+def browser_extract_text(selector: str | None = None, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return browser_tools.browser_extract_text(selector, timeout_sec)
+
+
+def browser_wait_for(selector: str, timeout_sec: float = 10.0) -> dict[str, Any]:
+    return browser_tools.browser_wait_for(selector, timeout_sec)
+
+
+def read_file_range(path: str, start_line: int, end_line: int) -> dict[str, Any]:
+    return editor_tools.read_file_range(path, start_line, end_line)
+
+
+def replace_in_file(path: str, old_text: str, new_text: str, replace_all: bool = False) -> dict[str, Any]:
+    return editor_tools.replace_in_file(path, old_text, new_text, replace_all)
+
+
+def append_file(path: str, content: str) -> dict[str, Any]:
+    return editor_tools.append_file(path, content)
+
+
+def apply_patch(path: str, unified_diff: str) -> dict[str, Any]:
+    return editor_tools.apply_patch(path, unified_diff)
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -964,6 +1103,18 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "directory_tree": lambda **a: directory_tree(a["path"], a.get("depth", 2)),
         "preview_plan_for_desktop_cleanup": lambda **a: preview_plan_for_desktop_cleanup(a.get("desktop_path")),
         "preview_organize_folder": lambda **a: preview_organize_folder(a["path"], a.get("mode", "type")),
+        "take_screenshot": lambda **a: take_screenshot(a.get("region")),
+        "ocr_image": lambda **a: ocr_image(a["path"], a.get("region")),
+        "list_windows": lambda **a: list_windows(),
+        "get_active_window": lambda **a: get_active_window(),
+        "list_processes": lambda **a: list_processes(a.get("query"), a.get("limit", 25)),
+        "read_file_range": lambda **a: read_file_range(a["path"], a["start_line"], a["end_line"]),
+        "wait_seconds": lambda **a: wait_seconds(a["seconds"]),
+        "wait_for_window": lambda **a: wait_for_window(a["title_query"], a.get("timeout_sec", 10.0)),
+        "wait_for_file": lambda **a: wait_for_file(a["path"], a.get("timeout_sec", 10.0)),
+        "wait_for_process_exit": lambda **a: wait_for_process_exit(a["pid"], a.get("timeout_sec", 10.0)),
+        "browser_extract_text": lambda **a: browser_extract_text(a.get("selector"), a.get("timeout_sec", 10.0)),
+        "browser_wait_for": lambda **a: browser_wait_for(a["selector"], a.get("timeout_sec", 10.0)),
         # Mutating
         "move_file": lambda **a: move_file(a["source"], a["destination"]),
         "rename_file": lambda **a: rename_file(a["source"], a["new_name"]),
@@ -971,6 +1122,22 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "organize_desktop_by_type": lambda **a: organize_desktop_by_type(a.get("desktop_path")),
         "organize_folder": lambda **a: organize_folder(a["path"], a.get("mode", "type")),
         "write_file": lambda **a: write_file(a["path"], a["content"], a.get("overwrite", False)),
+        "focus_window": lambda **a: focus_window(a["window_id"]),
+        "start_process": lambda **a: start_process(a["executable"], a.get("args"), a.get("working_dir")),
+        "stop_process": lambda **a: stop_process(a["pid"], a.get("force", False)),
+        "move_mouse": lambda **a: move_mouse(a["x"], a["y"], a.get("duration_ms", 0)),
+        "click": lambda **a: click(a["x"], a["y"], a.get("button", "left"), a.get("clicks", 1)),
+        "scroll": lambda **a: scroll(a["amount"], a.get("x"), a.get("y")),
+        "type_text": lambda **a: type_text(a["text"]),
+        "press_hotkey": lambda **a: press_hotkey(a["keys"]),
+        "browser_navigate": lambda **a: browser_navigate(a["url"]),
+        "browser_click": lambda **a: browser_click(a["selector"], a.get("timeout_sec", 10.0)),
+        "browser_fill": lambda **a: browser_fill(a["selector"], a["text"], a.get("timeout_sec", 10.0)),
+        "browser_press": lambda **a: browser_press(a["selector"], a["key"], a.get("timeout_sec", 10.0)),
+        "browser_download": lambda **a: browser_download(a.get("url"), a.get("click_selector"), a.get("timeout_sec", 10.0)),
+        "replace_in_file": lambda **a: replace_in_file(a["path"], a["old_text"], a["new_text"], a.get("replace_all", False)),
+        "append_file": lambda **a: append_file(a["path"], a["content"]),
+        "apply_patch": lambda **a: apply_patch(a["path"], a["unified_diff"]),
         # Shell (constrained)
         "run_command": lambda **a: run_command(a["command"], a.get("working_dir")),
         # Browser

@@ -92,12 +92,16 @@ _SAFE_EXECUTABLES: frozenset[str] = frozenset({
     # Search / info
     "echo", "where", "which",
     "whoami", "hostname",
-    "ipconfig", "systeminfo", "tasklist",
-    "date", "time",
-    # Development
+    "systeminfo", "tasklist",
+})
+
+# Powerful executables that should only be safe for exact allowlisted commands.
+_RESTRICTED_EXECUTABLES: frozenset[str] = frozenset({
     "python", "pip", "pytest",
     "git",
     "node", "npm", "npx",
+    "ipconfig",
+    "date", "time",
 })
 
 # Specific multi-word commands that are safe
@@ -107,6 +111,7 @@ _SAFE_FULL_COMMANDS: frozenset[str] = frozenset({
     "pip list",
     "pip --version",
     "pip freeze",
+    "pytest --version",
     "git status",
     "git log",
     "git log --oneline",
@@ -115,7 +120,10 @@ _SAFE_FULL_COMMANDS: frozenset[str] = frozenset({
     "git branch",
     "git branch -a",
     "git remote -v",
+    "ipconfig",
     "ipconfig /all",
+    "date",
+    "time",
     "systeminfo",
     "tasklist",
     "whoami",
@@ -311,7 +319,19 @@ def classify_command(command: str, extra_allowlist: list[str] | None = None) -> 
                     command=normalized, executable=executable,
                 )
 
-    # ── 9. Safe executable (but not exact full-command match) ──
+    # ── 9. Restricted executables remain risky unless exactly allowlisted ──
+
+    if executable in _RESTRICTED_EXECUTABLES:
+        return CommandVerdict(
+            tier="risky",
+            reason=(
+                f"Executable '{executable}' is only safe for explicitly allowlisted read-only commands."
+            ),
+            command=normalized,
+            executable=executable,
+        )
+
+    # ── 10. Safe executable (but not exact full-command match) ──
 
     if executable in _SAFE_EXECUTABLES:
         return CommandVerdict(
@@ -320,7 +340,7 @@ def classify_command(command: str, extra_allowlist: list[str] | None = None) -> 
             command=normalized, executable=executable,
         )
 
-    # ── 10. Everything else is RISKY ──
+    # ── 11. Everything else is RISKY ──
 
     return CommandVerdict(
         tier="risky",

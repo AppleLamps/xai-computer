@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from shell_guard import redact_secrets
 from config import (
     get_allowed_roots,
     get_coding_model,
@@ -57,10 +58,13 @@ class PlannedAction:
     index: int
     tool_name: str
     arguments: dict[str, Any]
+    action_class: str = ""
     label: str = ""          # human-readable one-liner
-    risk: str = ""           # "low" or "medium"; auto-detected if empty
+    risk: str = ""           # "low", "medium", or "high"; auto-detected if empty
 
     def __post_init__(self) -> None:
+        if not self.action_class:
+            self.action_class = _action_class(self.tool_name)
         if not self.label:
             self.label = _action_label(self.tool_name, self.arguments)
         if not self.risk:
@@ -71,6 +75,7 @@ class PlannedAction:
 class ApprovalCard:
     """Everything the UI needs to render an approval prompt."""
     actions: list[PlannedAction] = field(default_factory=list)
+    action_class: str = ""
     affected_root: str = ""
     dry_run: bool = False
     risk_level: str = "low"  # overall: max of individual risks
@@ -79,6 +84,8 @@ class ApprovalCard:
     shell_explanation: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
+        if self.actions and not self.action_class:
+            self.action_class = self.actions[0].action_class
         if self.actions:
             risks = {a.risk for a in self.actions}
             if "high" in risks:
@@ -93,6 +100,32 @@ class ApprovalCard:
                 self.risk_level = max_risk
         if not self.summary:
             self.summary = _build_summary(self.actions)
+
+
+def _action_class(tool: str) -> str:
+    if tool in (
+        "move_file",
+        "rename_file",
+        "create_folder",
+        "organize_desktop_by_type",
+        "organize_folder",
+        "write_file",
+        "replace_in_file",
+        "append_file",
+        "apply_patch",
+    ):
+        return "filesystem_write"
+    if tool in ("start_process", "stop_process"):
+        return "process_control"
+    if tool == "focus_window":
+        return "window_control"
+    if tool in ("move_mouse", "click", "scroll", "type_text", "press_hotkey"):
+        return "desktop_input"
+    if tool in ("browser_navigate", "browser_click", "browser_fill", "browser_press", "browser_download"):
+        return "browser_control"
+    if tool == "run_command":
+        return "shell"
+    return "read_only"
 
 
 def _action_label(tool: str, args: dict[str, Any]) -> str:
@@ -120,6 +153,57 @@ def _action_label(tool: str, args: dict[str, Any]) -> str:
         cmd = args.get("command", "?")
         cwd = args.get("working_dir", "(project root)")
         return f"RUN COMMAND: {cmd}  [in {cwd}]"
+    if tool == "focus_window":
+        return f"FOCUS WINDOW id={args.get('window_id', '?')}"
+    if tool == "start_process":
+        exe = args.get("executable", "?")
+        raw_args = " ".join(args.get("args", []) or [])
+        cwd = args.get("working_dir", "(project root)")
+        return f"START PROCESS: {exe} {raw_args}".strip() + f"  [in {cwd}]"
+    if tool == "stop_process":
+        force = " [FORCE]" if args.get("force") else ""
+        return f"STOP PROCESS pid={args.get('pid', '?')}{force}"
+    if tool == "move_mouse":
+        return f"MOVE MOUSE to ({args.get('x', '?')}, {args.get('y', '?')})"
+    if tool == "click":
+        return (
+            f"CLICK {args.get('button', 'left')} at ({args.get('x', '?')}, {args.get('y', '?')})"
+            f" x{args.get('clicks', 1)}"
+        )
+    if tool == "scroll":
+        return f"SCROLL {args.get('amount', '?')} at ({args.get('x', 'current')}, {args.get('y', 'current')})"
+    if tool == "type_text":
+        preview = redact_secrets(args.get("text", ""))
+        if len(preview) > 60:
+            preview = preview[:57] + "..."
+        return f"TYPE TEXT ({len(args.get('text', ''))} chars): {preview!r}"
+    if tool == "press_hotkey":
+        return f"PRESS HOTKEY: {'+'.join(args.get('keys', []))}"
+    if tool == "browser_navigate":
+        return f"BROWSER NAVIGATE: {args.get('url', '?')}"
+    if tool == "browser_click":
+        return f"BROWSER CLICK selector={args.get('selector', '?')!r}"
+    if tool == "browser_fill":
+        preview = redact_secrets(args.get("text", ""))
+        if len(preview) > 60:
+            preview = preview[:57] + "..."
+        return f"BROWSER FILL selector={args.get('selector', '?')!r} text={preview!r}"
+    if tool == "browser_press":
+        return f"BROWSER PRESS selector={args.get('selector', '?')!r} key={args.get('key', '?')!r}"
+    if tool == "browser_download":
+        domain = args.get("url", "(current page)")
+        selector = args.get("click_selector")
+        suffix = f" selector={selector!r}" if selector else ""
+        return f"BROWSER DOWNLOAD {domain}{suffix}"
+    if tool == "replace_in_file":
+        return f"REPLACE IN FILE {args.get('path', '?')} [all={bool(args.get('replace_all'))}]"
+    if tool == "append_file":
+        size = len(args.get("content", "").encode("utf-8", errors="replace"))
+        return f"APPEND FILE {args.get('path', '?')} ({size} bytes)"
+    if tool == "apply_patch":
+        diff = args.get("unified_diff", "")
+        hunk_count = diff.count("@@")
+        return f"APPLY PATCH {args.get('path', '?')} ({hunk_count} hunk(s))"
     return f"{tool}({json.dumps(args, ensure_ascii=False)})"
 
 
@@ -138,6 +222,10 @@ def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
             if verdict.tier == "risky":
                 return "high"
             return "medium"  # safe-tier shell commands are still medium risk
+        return "high"
+    if tool in ("focus_window", "start_process", "browser_navigate", "replace_in_file", "append_file", "apply_patch"):
+        return "medium"
+    if tool in ("click", "type_text", "press_hotkey", "stop_process", "browser_click", "browser_fill", "browser_press", "browser_download"):
         return "high"
     return "low"
 
@@ -168,6 +256,31 @@ def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
         return f"Previewing organize-by-{mode} for {path}"
     if tool == "open_url":
         return f"Opening {args.get('url', '?')}"
+    if tool == "take_screenshot":
+        return "Capturing screenshot"
+    if tool == "ocr_image":
+        return f"Running OCR on {path}"
+    if tool == "list_windows":
+        return "Listing windows"
+    if tool == "get_active_window":
+        return "Inspecting active window"
+    if tool == "list_processes":
+        query = args.get("query")
+        return f"Listing processes{' for ' + query if query else ''}"
+    if tool == "read_file_range":
+        return f"Reading lines {args.get('start_line', '?')}-{args.get('end_line', '?')} from {path}"
+    if tool == "wait_seconds":
+        return f"Waiting {args.get('seconds', '?')}s"
+    if tool == "wait_for_window":
+        return f"Waiting for window '{args.get('title_query', '?')}'"
+    if tool == "wait_for_file":
+        return f"Waiting for file {path}"
+    if tool == "wait_for_process_exit":
+        return f"Waiting for process {args.get('pid', '?')} to exit"
+    if tool == "browser_extract_text":
+        return f"Extracting text from selector {args.get('selector', 'body')!r}"
+    if tool == "browser_wait_for":
+        return f"Waiting for browser selector {args.get('selector', '?')!r}"
     return f"Running {tool}"
 
 
@@ -176,7 +289,12 @@ def _build_summary(actions: list[PlannedAction]) -> str:
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
     org_count = sum(1 for a in actions if a.tool_name in ("organize_desktop_by_type", "organize_folder"))
     write_count = sum(1 for a in actions if a.tool_name == "write_file")
+    edit_count = sum(1 for a in actions if a.tool_name in ("replace_in_file", "append_file", "apply_patch"))
     cmd_count = sum(1 for a in actions if a.tool_name == "run_command")
+    process_count = sum(1 for a in actions if a.action_class == "process_control")
+    window_count = sum(1 for a in actions if a.action_class == "window_control")
+    input_count = sum(1 for a in actions if a.action_class == "desktop_input")
+    browser_count = sum(1 for a in actions if a.action_class == "browser_control")
 
     parts: list[str] = []
     if move_count:
@@ -185,10 +303,20 @@ def _build_summary(actions: list[PlannedAction]) -> str:
         parts.append(f"{folder_count} folder(s) to create")
     if write_count:
         parts.append(f"{write_count} file(s) to write")
+    if edit_count:
+        parts.append(f"{edit_count} file edit(s)")
     if org_count:
         parts.append(f"{org_count} organize operation(s)")
     if cmd_count:
         parts.append(f"{cmd_count} shell command(s)")
+    if process_count:
+        parts.append(f"{process_count} process action(s)")
+    if window_count:
+        parts.append(f"{window_count} window action(s)")
+    if input_count:
+        parts.append(f"{input_count} desktop input action(s)")
+    if browser_count:
+        parts.append(f"{browser_count} browser action(s)")
     return ", ".join(parts) if parts else "action(s) pending"
 
 
@@ -246,6 +374,7 @@ def build_approval_card(tool_calls: list[ToolCallSpec]) -> ApprovalCard:
 
     return ApprovalCard(
         actions=actions,
+        action_class=actions[0].action_class if actions else "",
         affected_root=_detect_affected_root(actions),
         dry_run=is_dry_run(),
         shell_explanation=shell_explanation,
@@ -347,6 +476,24 @@ def _process_tool_calls(
     sink: OutputSink,
     assistant_content: str | None = None,
 ) -> None:
+    def _preflight_mutating_tool(call: ToolCallSpec) -> tuple[bool, dict[str, Any] | None]:
+        if call.name == "run_command":
+            from shell_guard import classify_command, get_extra_allowlist
+
+            verdict = classify_command(call.arguments.get("command", ""), get_extra_allowlist())
+            if verdict.tier == "blocked":
+                return True, None
+        if call.name == "press_hotkey":
+            from desktop_tools import classify_hotkey
+
+            verdict = classify_hotkey(call.arguments.get("keys", []))
+            if verdict.get("blocked"):
+                return True, verdict
+        return False, None
+
+    def _is_retryable(call: ToolCallSpec) -> bool:
+        return _action_class(call.name) == "filesystem_write"
+
     tool_calls = _ensure_tool_call_ids(tool_calls)
     messages.append(_build_assistant_tool_message(tool_calls, assistant_content))
 
@@ -358,15 +505,27 @@ def _process_tool_calls(
             sink.progress(f"  ↳ {_tool_progress_label(tc.name, tc.arguments)}")
             res = dispatch_tool(tc.name, tc.arguments)
             messages.append(_tool_result_message(tc.id, res))
-            if res.get("ok") is False:
+            if res.get("ok") is False and not res.get("blocked"):
                 log_event("tool_error", {"tool": tc.name, "error": res.get("error")}, phase="error")
+            i += 1
+            continue
+
+        blocked, blocked_result = _preflight_mutating_tool(tc)
+        if blocked:
+            res = blocked_result if blocked_result is not None else dispatch_tool(tc.name, tc.arguments)
+            messages.append(_tool_result_message(tc.id, res))
             i += 1
             continue
 
         # Gather consecutive mutating calls into a confirmation block
         j = i
         block: list[ToolCallSpec] = []
+        action_class = _action_class(tc.name)
         while j < n and tool_calls[j].name in MUTATING_TOOL_NAMES:
+            if _action_class(tool_calls[j].name) != action_class:
+                break
+            if _preflight_mutating_tool(tool_calls[j])[0]:
+                break
             block.append(tool_calls[j])
             j += 1
 
@@ -396,16 +555,17 @@ def _process_tool_calls(
                 res = {"ok": False, "error": "user_declined", "declined": True}
             results[b.id] = res
             messages.append(_tool_result_message(b.id, res))
-            if res.get("ok") is False and not res.get("declined"):
+            if res.get("ok") is False and not res.get("declined") and not res.get("blocked"):
                 log_event("tool_error", {"tool": b.name, "error": res.get("error")}, phase="error")
 
         if approved:
             # Offer one retry pass for failed idempotent operations (not run_command).
             failed_block = [
                 b for b in block
-                if b.name != "run_command"
+                if _is_retryable(b)
                 and not results[b.id].get("ok")
                 and not results[b.id].get("declined")
+                and not results[b.id].get("blocked")
             ]
             if failed_block:
                 sink.info(
@@ -538,6 +698,7 @@ def _run_turn(
     model = get_xai_model()
     tools = get_tool_definitions()
 
+    turn_start = len(messages)
     messages.append({"role": "user", "content": user_text})
     log_event("user_message", {"length": len(user_text)}, user_request=user_text)
 
@@ -548,7 +709,7 @@ def _run_turn(
         except RuntimeError as e:
             sink.error(f"[error] {e}")
             log_event("api_error", {"error": str(e)}, phase="error")
-            messages.pop()
+            del messages[turn_start:]
             return
 
         if result.tool_calls:
@@ -568,7 +729,7 @@ def _run_turn(
     else:
         sink.error("[error] Tool loop limit reached; stopping this turn.")
         log_event("tool_loop_limit", {}, phase="error")
-        messages.pop()
+        del messages[turn_start:]
 
 
 def get_startup_info() -> dict[str, Any]:

@@ -59,7 +59,7 @@ class TerminalSink:
         print(f"  {card.summary}{risk_tag}")
         print(f"{'-' * 60}")
         for action in card.actions:
-            risk_marker = " [!]" if action.risk == "medium" else ""
+            risk_marker = " [!!]" if action.risk == "high" else (" [!]" if action.risk == "medium" else "")
             print(f"  {action.index}. {action.label}{risk_marker}")
         print(f"{'=' * 60}\n")
 

@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 XAI_BASE_URL = "https://api.x.ai/v1/chat/completions"
+
+# Retry configuration — applied to transient network/server errors only.
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds; doubles each attempt (1s, 2s, 4s)
 
 
 @dataclass
@@ -69,14 +75,20 @@ def chat_completion(
         },
     )
     ctx = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec, context=ctx) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        err_text = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"xAI HTTP {e.code}: {err_text}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"xAI connection error: {e}") from e
+    for attempt in range(_MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_sec, context=ctx) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            break  # success — exit retry loop
+        except urllib.error.HTTPError as e:
+            is_last = attempt == _MAX_RETRIES - 1
+            if e.code not in _RETRYABLE_HTTP_CODES or is_last:
+                err_text = e.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"xAI HTTP {e.code}: {err_text}") from e
+        except urllib.error.URLError as e:
+            if attempt == _MAX_RETRIES - 1:
+                raise RuntimeError(f"xAI connection error: {e}") from e
+        time.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
 
     choices = body.get("choices") or []
     if not choices:

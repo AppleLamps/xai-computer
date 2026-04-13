@@ -76,6 +76,11 @@ _FG_RISK_HIGH = "#b71c1c"
 _BUSY_COLOR = "#ef6c00"
 
 
+# How long the worker thread waits for the user to approve/cancel before
+# auto-cancelling. Prevents permanent hangs if the UI becomes unresponsive.
+_CONFIRMATION_TIMEOUT_S = 300  # 5 minutes
+
+
 # ---------------------------------------------------------------------------
 # GuiSink — thread-safe OutputSink for Tkinter
 # ---------------------------------------------------------------------------
@@ -88,6 +93,9 @@ class GuiSink:
         self._app = app
         self._confirmation_event = threading.Event()
         self._confirmation_answer: str = "cancel"
+        # Increments with every plan() call so stale approval-card clicks
+        # from a timed-out card are silently ignored.
+        self._plan_generation: int = 0
 
     def _post(self, fn: Any, *args: Any) -> None:
         """Schedule *fn* on the main thread, silently dropping if shutting down."""
@@ -110,10 +118,18 @@ class GuiSink:
     def plan(self, card: ApprovalCard) -> None:
         if self._app._shutting_down:
             return
+        self._plan_generation += 1
+        my_generation = self._plan_generation
         self._confirmation_event.clear()
         self._confirmation_answer = "cancel"
-        self._post(self._app.show_approval_card, card, self)
-        self._confirmation_event.wait()
+        self._post(self._app.show_approval_card, card, self, my_generation)
+        timed_out = not self._confirmation_event.wait(timeout=_CONFIRMATION_TIMEOUT_S)
+        if timed_out and not self._app._shutting_down:
+            # Dismiss the stale card and cancel; any late button click will
+            # be ignored because its generation no longer matches.
+            self._post(self._app._dismiss_approval_card)
+            self._post(self._app.append_error,
+                       "[error] Approval timed out after 5 minutes — action cancelled.")
 
     def progress(self, text: str) -> None:
         self._post(self._app.append_progress, text)
@@ -121,7 +137,11 @@ class GuiSink:
     def prompt_confirmation(self, prompt_text: str) -> str:
         return self._confirmation_answer
 
-    def resolve_confirmation(self, answer: str) -> None:
+    def resolve_confirmation(self, answer: str, generation: int | None = None) -> None:
+        # If a generation is provided, only accept if it matches the current one.
+        # None means force-accept (used by _on_close to unblock on shutdown).
+        if generation is not None and generation != self._plan_generation:
+            return  # stale click from an old timed-out card — ignore
         self._confirmation_answer = answer
         self._confirmation_event.set()
 
@@ -589,7 +609,7 @@ class AssistantApp:
     # APPROVAL PANEL
     # ===================================================================
 
-    def show_approval_card(self, card: ApprovalCard, sink: GuiSink) -> None:
+    def show_approval_card(self, card: ApprovalCard, sink: GuiSink, generation: int = 0) -> None:
         inner = self._approval_inner
         for w in inner.winfo_children():
             w.destroy()
@@ -751,7 +771,7 @@ class AssistantApp:
                 except tk.TclError:
                     pass
             self._approval_scroll_widgets.clear()
-            self._resolve_approval(answer, sink)
+            self._resolve_approval(answer, sink, generation)
 
         tk.Button(
             btn_frame, text="  Approve  ", font=self._f_approval_btn,
@@ -786,7 +806,7 @@ class AssistantApp:
             risk_mark = " [!]" if action.risk == "medium" else ""
             self._insert(f"  {action.index}. {action.label}{risk_mark}\n", "plan_line")
 
-    def _resolve_approval(self, answer: str, sink: GuiSink) -> None:
+    def _resolve_approval(self, answer: str, sink: GuiSink, generation: int = 0) -> None:
         # Clean up any scroll bindings (safety net)
         for w in self._approval_scroll_widgets:
             try:
@@ -800,7 +820,26 @@ class AssistantApp:
             self._insert("[Approved]\n", "progress")
         else:
             self._insert("[Cancelled]\n\n", "info")
-        sink.resolve_confirmation(answer)
+        sink.resolve_confirmation(answer, generation)
+
+    def _dismiss_approval_card(self) -> None:
+        """Hide the approval card after a timeout and clean up its bindings.
+
+        Called by GuiSink.plan() when the 5-minute confirmation timeout fires.
+        Any subsequent button click on the (now hidden) card will be ignored
+        because its generation no longer matches the current one in GuiSink.
+        """
+        for w in self._approval_scroll_widgets:
+            try:
+                w.unbind("<MouseWheel>")
+            except tk.TclError:
+                pass
+        self._approval_scroll_widgets.clear()
+        try:
+            self._approval_outer.pack_forget()
+        except tk.TclError:
+            pass
+        self._insert("[Timed out — cancelled]\n\n", "info")
 
     # ===================================================================
     # INPUT HANDLING

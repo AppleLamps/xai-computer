@@ -6,7 +6,8 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 
 - **Inspect folders** — list contents, show directory trees, find files by name
 - **Analyze directories** — file counts by type, total sizes, duplicate detection
-- **Preview organization plans** — see exactly what would move before anything changes
+- **Explain before acting** — describes the plan in the same message that contains tool calls, so you always know what's happening and why
+- **Retry failed operations** — when some file operations in a batch fail, the assistant offers to retry just the failed ones without re-running the ones that succeeded
 - **Move and rename files** — with explicit approval, collision-safe naming, and undo
 - **Organize folders** — by file type, by month, or by year (desktop or any allowed folder)
 - **Show recent or largest files** — quick answers about what's taking up space
@@ -61,6 +62,7 @@ User input
     |            |
     |            v
     |       xai_client.py ── HTTPS POST to api.x.ai/v1/chat/completions
+    |                           (3 retries w/ exponential backoff on transient errors)
     |            |
     |            v
     |       Model returns text or tool_calls
@@ -74,6 +76,10 @@ User input
     |                    v
     |               User approves? ── yes ── execute, record undo ── return result
     |                                  no ── return declined      ── return result
+    |                    |
+    |                    v (on failure)
+    |               Retry card for failed ops? ── yes ── re-dispatch, update history
+    |                                              no ── continue with partial results
     v
   Results appended to conversation ── loop back to model or render final response
 ```
@@ -177,7 +183,7 @@ Commands are handled locally and never sent to the model.
 | `/mode` | Switch verbose or concise output | `/mode concise` |
 | `/dry-on` | Enable dry-run mode | `/dry-on` |
 | `/dry-off` | Disable dry-run mode | `/dry-off` |
-| `/undo` | Undo the last reversible action | `/undo` |
+| `/undo` | Undo the last reversible action, or `/undo N` to undo the last N | `/undo` or `/undo 3` |
 | `/history` | Show undo history for this session | `/history` |
 | `/analyze` | Analyze a directory (types, sizes, duplicates) | `/analyze C:\Users\you\Desktop` |
 | `/tree` | Show directory tree | `/tree C:\Users\you\Documents 3` |
@@ -281,6 +287,11 @@ Assistant: [calls read_text_file, shows content up to 5000 chars]
 You: /undo
 Undone: C:\Users\you\Desktop\Images\photo.png -> C:\Users\you\Desktop\photo.png
 
+You: /undo 3
+Undone: ...
+Undone: ...
+Undone: ...
+
 You: /history
   1. [2026-04-12T14:30:22] move_file: ... -> ... [UNDONE]
   2. [2026-04-12T14:30:22] organize_move: ... -> ...
@@ -330,10 +341,13 @@ Use `/model code` for the fastest, cheapest code generation, or set `XAI_CODING_
 /dry-off         # back to normal execution
 ```
 
+**Retry failed operations.** When a batch of mutating actions is approved and some fail (e.g. file locked, permission denied), the assistant shows a second approval card for only the failed operations. You can retry them or skip. `run_command` failures are excluded from retry because commands may have partial side effects.
+
 **Undo** reverses the most recent action from this session:
 
 ```
 /undo            # reverse last move, rename, or folder creation
+/undo 5          # reverse the last 5 actions (stops early if nothing left)
 /history         # see all reversible actions and their status
 ```
 
@@ -350,7 +364,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **250 tests passing** across 6 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, collision-safe restore, model switching, verbose mode, session state, and approval card construction.
+Current status: **275 tests passing** across 7 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, batch undo (`undo_n`), collision-safe restore, API retry with exponential backoff, partial batch retry, model switching, verbose mode, session state, and approval card construction.
 
 ## Troubleshooting
 
@@ -384,8 +398,9 @@ python gui.py
 
 ### GUI features
 
-- **Chat area** — user and assistant messages with visual distinction, tool results and errors styled separately
-- **Approval panel** — appears inline when mutating actions are proposed; shows scope, risk level, numbered actions, and Approve / Cancel buttons. Nothing executes until you click Approve.
+- **Chat area** — user and assistant messages with visual distinction, tool results and errors styled separately; the assistant explains its plan in the same message as tool invocations
+- **Approval panel** — appears inline when mutating actions are proposed; shows scope, risk level, numbered actions, and Approve / Cancel buttons. Nothing executes until you click Approve. Auto-cancels after 5 minutes if left unattended.
+- **Retry panel** — if some operations in an approved batch fail, a second approval card appears for just the failed ones so you can retry without re-running what succeeded
 - **Side panel controls** — model selector (fast / quality), dry-run toggle, verbose toggle, undo, history, clear chat
 - **Status header** — current model, dry-run state, output mode, session ID
 - **Non-blocking** — model calls run in a background thread; the UI stays responsive

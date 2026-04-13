@@ -250,6 +250,22 @@ def undo_last() -> dict[str, Any]:
         return {"ok": False, "error": f"Undo failed: {e}"}
 
 
+def undo_n(n: int) -> list[dict[str, Any]]:
+    """Undo the last *n* actions from this session.
+
+    Calls ``undo_last()`` up to *n* times, stopping early if there is nothing
+    left to undo. Returns the list of result dicts in execution order (oldest
+    undo first).
+    """
+    results: list[dict[str, Any]] = []
+    for _ in range(max(0, n)):
+        result = undo_last()
+        results.append(result)
+        if not result.get("ok") and result.get("error", "").startswith("Nothing to undo"):
+            break
+    return results
+
+
 # ---------------------------------------------------------------------------
 # History display
 # ---------------------------------------------------------------------------

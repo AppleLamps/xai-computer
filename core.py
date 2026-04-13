@@ -142,6 +142,35 @@ def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
     return "low"
 
 
+def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
+    """Short, user-friendly label for read-only tool calls shown as progress."""
+    path = args.get("path") or args.get("desktop_path") or ""
+    if tool == "list_directory":
+        return f"Listing {path}"
+    if tool == "analyze_directory":
+        return f"Analyzing {path}"
+    if tool == "directory_tree":
+        return f"Scanning tree at {path}"
+    if tool == "search_files":
+        return f"Searching for '{args.get('query', '?')}' in {path}"
+    if tool == "recent_files":
+        return f"Finding recent files in {path}"
+    if tool == "largest_files":
+        return f"Finding largest files in {path}"
+    if tool == "file_type_summary":
+        return f"Summarizing file types in {path}"
+    if tool == "read_text_file":
+        return f"Reading {path}"
+    if tool == "preview_plan_for_desktop_cleanup":
+        return f"Previewing desktop cleanup{' at ' + path if path else ''}"
+    if tool == "preview_organize_folder":
+        mode = args.get("mode", "type")
+        return f"Previewing organize-by-{mode} for {path}"
+    if tool == "open_url":
+        return f"Opening {args.get('url', '?')}"
+    return f"Running {tool}"
+
+
 def _build_summary(actions: list[PlannedAction]) -> str:
     move_count = sum(1 for a in actions if a.tool_name in ("move_file", "rename_file"))
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
@@ -326,6 +355,7 @@ def _process_tool_calls(
     while i < n:
         tc = tool_calls[i]
         if tc.name not in MUTATING_TOOL_NAMES:
+            sink.progress(f"  ↳ {_tool_progress_label(tc.name, tc.arguments)}")
             res = dispatch_tool(tc.name, tc.arguments)
             messages.append(_tool_result_message(tc.id, res))
             if res.get("ok") is False:
@@ -354,6 +384,7 @@ def _process_tool_calls(
         )
 
         executed = 0
+        results: dict[str, dict[str, Any]] = {}
         for b in block:
             if approved:
                 res = dispatch_tool(b.name, b.arguments)
@@ -363,9 +394,43 @@ def _process_tool_calls(
                         sink.progress(f"  Done: {b.name}")
             else:
                 res = {"ok": False, "error": "user_declined", "declined": True}
+            results[b.id] = res
             messages.append(_tool_result_message(b.id, res))
             if res.get("ok") is False and not res.get("declined"):
                 log_event("tool_error", {"tool": b.name, "error": res.get("error")}, phase="error")
+
+        if approved:
+            # Offer one retry pass for failed idempotent operations (not run_command).
+            failed_block = [
+                b for b in block
+                if b.name != "run_command"
+                and not results[b.id].get("ok")
+                and not results[b.id].get("declined")
+            ]
+            if failed_block:
+                sink.info(
+                    f"  ⚠  {len(failed_block)}/{len(block)} operation(s) failed — "
+                    "would you like to retry them?"
+                )
+                retry_card = build_approval_card(failed_block)
+                retry_card.summary = f"Retry {len(failed_block)} failed operation(s)"
+                sink.plan(retry_card)
+                retry_answer = sink.prompt_confirmation("Retry failed operations? (yes / cancel): ")
+                if is_affirmative_confirmation(retry_answer):
+                    log_event("retry_batch", {"count": len(failed_block)}, phase="retry")
+                    for b in failed_block:
+                        res = dispatch_tool(b.name, b.arguments)
+                        was_ok = results[b.id].get("ok", False)
+                        results[b.id] = res
+                        if res.get("ok") and not was_ok:
+                            executed += 1
+                        # Update the tool-result message already in history.
+                        for msg in reversed(messages):
+                            if msg.get("role") == "tool" and msg.get("tool_call_id") == b.id:
+                                msg["content"] = json.dumps(res, ensure_ascii=False, default=str)
+                                break
+                        if res.get("ok") is False:
+                            log_event("tool_error", {"tool": b.name, "error": res.get("error")}, phase="error")
 
         if approved:
             # Try structured summary; fall back to plain text
@@ -487,6 +552,9 @@ def _run_turn(
             return
 
         if result.tool_calls:
+            # Show the model's plan/progress text before processing tools
+            if result.content and result.content.strip():
+                sink.assistant(result.content.strip())
             _process_tool_calls(messages, result.tool_calls, sink, result.content)
             continue
 

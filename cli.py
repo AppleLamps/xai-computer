@@ -26,7 +26,7 @@ from tools import (
     largest_files,
     recent_files,
 )
-from undo import get_history, undo_last
+from undo import get_history, undo_last, undo_n
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show available commands",
     "/status": "Show current session status",
     "/history": "Show undo history for this session",
-    "/undo": "Undo the last reversible action",
+    "/undo": "Undo the last reversible action  (or /undo N to undo last N)",
     "/dry-on": "Enable dry-run mode (simulate only)",
     "/dry-off": "Disable dry-run mode (execute normally)",
     "/model": "Show or switch model (/model fast, /model quality)",
@@ -139,7 +139,30 @@ def _handle_history(sink: TerminalSink) -> None:
     sink.info("")
 
 
-def _handle_undo(sink: TerminalSink) -> None:
+def _handle_undo(sink: TerminalSink, args: str = "") -> None:
+    count_str = args.strip()
+    if count_str:
+        try:
+            n = int(count_str)
+        except ValueError:
+            sink.info(f"Usage: /undo [N]  — undo the last N actions (default: 1)")
+            return
+        if n < 1:
+            sink.info("N must be a positive integer.")
+            return
+        results = undo_n(n)
+        for result in results:
+            if result.get("ok"):
+                action = result.get("action", "")
+                note = result.get("note", "")
+                if action == "create_folder":
+                    sink.info(f"Undone: removed empty folder {result.get('removed', '?')}")
+                else:
+                    sink.info(f"Undone: {result.get('from', '?')} -> {result.get('restored_to', '?')}{note}")
+            else:
+                sink.info(f"Cannot undo: {result.get('error', 'unknown reason')}")
+        return
+
     result = undo_last()
     if result.get("ok"):
         action = result.get("action", "")
@@ -319,7 +342,7 @@ def try_slash_command(user_text: str, sink: TerminalSink) -> bool:
         _handle_history(sink)
         return True
     if cmd == "/undo":
-        _handle_undo(sink)
+        _handle_undo(sink, args)
         return True
     if cmd == "/dry-on":
         _handle_dry_on(sink)

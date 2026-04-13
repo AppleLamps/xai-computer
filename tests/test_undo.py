@@ -212,3 +212,74 @@ class TestHistory:
             record_move(f"/a/{i}.txt", f"/b/{i}.txt")
         h = get_history(limit=3)
         assert len(h) == 3
+
+
+# ---------------------------------------------------------------------------
+# undo_n
+# ---------------------------------------------------------------------------
+
+
+class TestUndoN:
+    def test_undo_zero_returns_empty(self) -> None:
+        from undo import undo_n
+        assert undo_n(0) == []
+
+    def test_undo_negative_returns_empty(self) -> None:
+        from undo import undo_n
+        assert undo_n(-5) == []
+
+    def test_undoes_n_actions(self, tmp_path: Path) -> None:
+        from undo import undo_n
+
+        f1 = tmp_path / "a.txt"
+        f2 = tmp_path / "b.txt"
+        f3 = tmp_path / "c.txt"
+        for f in (f1, f2, f3):
+            f.write_text("x")
+
+        dst1 = tmp_path / "moved_a.txt"
+        dst2 = tmp_path / "moved_b.txt"
+        dst3 = tmp_path / "moved_c.txt"
+        f1.rename(dst1)
+        f2.rename(dst2)
+        f3.rename(dst3)
+
+        record_move(str(f1), str(dst1))
+        record_move(str(f2), str(dst2))
+        record_move(str(f3), str(dst3))
+
+        results = undo_n(2)
+        assert len(results) == 2
+        assert all(r["ok"] for r in results)
+        # The two most recent were undone; first remains
+        assert dst1.exists()
+        assert f2.exists() or f3.exists()  # one of them was restored twice
+
+    def test_stops_early_when_nothing_left(self, tmp_path: Path) -> None:
+        from undo import undo_n
+
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        dst = tmp_path / "dst.txt"
+        f.rename(dst)
+        record_move(str(f), str(dst))
+
+        # Ask for 5 but only 1 available
+        results = undo_n(5)
+        ok_results = [r for r in results if r.get("ok")]
+        fail_results = [r for r in results if not r.get("ok")]
+        assert len(ok_results) == 1
+        assert len(fail_results) == 1  # stopped after "nothing to undo"
+
+    def test_undo_n_one_behaves_like_undo_last(self, tmp_path: Path) -> None:
+        from undo import undo_n
+
+        f = tmp_path / "file.txt"
+        dst = tmp_path / "moved.txt"
+        f.write_text("hi")
+        f.rename(dst)
+        record_move(str(f), str(dst))
+
+        results = undo_n(1)
+        assert len(results) == 1
+        assert results[0]["ok"] is True

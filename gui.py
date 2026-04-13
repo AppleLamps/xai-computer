@@ -31,11 +31,15 @@ from logger import SESSION_ID
 from schemas import SYSTEM_PROMPT
 from undo import get_history, undo_last
 
+from gui_markdown import insert_markdown
+
 # ---------------------------------------------------------------------------
 # Design tokens
 # ---------------------------------------------------------------------------
 
 _APP_TITLE = "xai-computer"
+_INPUT_MIN_LINES = 3
+_INPUT_MAX_LINES = 8
 _WIN_W = 960
 _WIN_H = 720
 _MIN_W = 720
@@ -166,6 +170,12 @@ class AssistantApp:
         self._shutting_down = False
         self._sink = GuiSink(self)
         self._approval_scroll_widgets: list[tk.Widget] = []
+        self._find_win: tk.Toplevel | None = None
+        self._find_var: tk.StringVar | None = None
+        self._find_last_start: str | None = None
+        self._find_last_end: str | None = None
+        self._find_trace_id: str | None = None  # trace id for query field
+        self._find_close_callback: Any = None
 
         # Fonts
         self._f_ui = ("Segoe UI", 10)
@@ -183,6 +193,7 @@ class AssistantApp:
         self._refresh_undo_indicator()
         self._show_welcome()
         self.root.after(100, self._focus_input)
+        self.root.after(120, self._sync_input_height)
 
     # ── Window close ──
     def _on_close(self) -> None:
@@ -195,12 +206,31 @@ class AssistantApp:
     # ── Shortcuts ──
     def _bind_shortcuts(self) -> None:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.bind_all("<Escape>", lambda e: self._focus_input())
+        self.root.bind_all("<Escape>", self._on_escape_all)
         self.root.bind_all("<Control-l>", lambda e: self._focus_input())
+        self.root.bind_all("<Control-f>", self._on_find_shortcut)
+        self.root.bind_all("<Control-End>", lambda e: self._scroll_chat_end())
 
     def _focus_input(self) -> None:
         if not self._busy:
             self._input.focus_set()
+
+    def _on_escape_all(self, event: tk.Event) -> str | None:
+        if self._find_win is not None:
+            try:
+                if self._find_win.winfo_exists():
+                    cb = self._find_close_callback
+                    if cb:
+                        cb()
+                    return "break"
+            except tk.TclError:
+                pass
+        self._focus_input()
+        return None
+
+    def _on_find_shortcut(self, event: tk.Event) -> str | None:
+        self._open_find_dialog()
+        return "break"
 
     # ===================================================================
     # UI CONSTRUCTION
@@ -250,6 +280,26 @@ class AssistantApp:
         # Left: chat + approval overlay
         self._chat_container = tk.Frame(body, bg=_BG)
         body.add(self._chat_container, stretch="always", minsize=400)
+
+        bar = tk.Frame(self._chat_container, bg=_BG_CHAT, padx=6, pady=4)
+        bar.pack(fill=tk.X)
+        bf = ("Segoe UI", 9)
+        tk.Button(
+            bar, text="\u2193 Latest", font=bf, command=self._scroll_chat_end,
+            bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        tk.Button(
+            bar, text="Find\u2026", font=bf, command=self._open_find_dialog,
+            bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        tk.Button(
+            bar, text="Copy all", font=bf, command=self._copy_transcript,
+            bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        tk.Label(
+            bar, text="Transcript  \u00b7  Ctrl+F find  \u00b7  Ctrl+End latest",
+            font=("Segoe UI", 8), bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+        ).pack(side=tk.LEFT)
 
         self._chat = scrolledtext.ScrolledText(
             self._chat_container, wrap=tk.WORD, state=tk.DISABLED,
@@ -325,6 +375,34 @@ class AssistantApp:
         c.tag_configure("undo_fail", foreground=_BTN_CANCEL_BG,
                         font=self._f_ui_sm, lmargin1=4,
                         spacing1=4, spacing3=4)
+
+        # Markdown (assistant); combine with "asst_msg" at insert time
+        c.tag_configure("md_bold", font=self._f_ui_bold)
+        c.tag_configure("md_italic", font=("Segoe UI", 10, "italic"))
+        c.tag_configure("md_code", font=self._f_mono, background="#eeeeee")
+        c.tag_configure(
+            "md_codeblock", font=self._f_mono, background="#eceff1",
+            foreground=_FG, lmargin1=8, lmargin2=8, spacing1=2, spacing3=4,
+        )
+        c.tag_configure(
+            "md_h1", font=("Segoe UI", 11, "bold"), spacing1=8, spacing3=2,
+        )
+        c.tag_configure("md_h2", font=self._f_ui_bold, spacing1=6, spacing3=2)
+        c.tag_configure("md_h3", font=self._f_ui_sm_bold, spacing1=4, spacing3=1)
+        c.tag_configure(
+            "md_li", font=self._f_ui, lmargin1=4, lmargin2=18,
+        )
+        c.tag_configure(
+            "md_li_num", font=self._f_ui, lmargin1=4, lmargin2=18,
+        )
+        c.tag_configure(
+            "md_quote", font=self._f_ui, foreground=_FG_LABEL,
+            background="#f5f5f5", lmargin1=8, lmargin2=8, spacing1=1, spacing3=1,
+        )
+        c.tag_configure("md_rule", foreground=_TURN_SEP_COLOR, font=("Segoe UI", 2))
+        c.tag_configure("md_link", foreground=_BTN_PRIMARY_BG, underline=True)
+        c.tag_configure("md_url_note", font=self._f_mono_sm, foreground=_FG_DIM)
+        c.tag_configure("find_hl", background="#fff59d")
 
     # ── Sidebar ──
 
@@ -428,13 +506,19 @@ class AssistantApp:
         bar.pack(fill=tk.X, side=tk.BOTTOM)
 
         self._input = tk.Text(
-            bar, height=3, font=self._f_ui, bg=_BG_INPUT, fg=_FG,
+            bar, height=_INPUT_MIN_LINES, font=self._f_ui, bg=_BG_INPUT, fg=_FG,
             relief=tk.SOLID, borderwidth=1, padx=8, pady=6, wrap=tk.WORD,
             insertbackground=_FG,
         )
         self._input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
         self._input.bind("<Return>", self._on_enter)
         self._input.bind("<Shift-Return>", lambda e: None)
+        self._input.bind("<Control-Return>", self._on_ctrl_enter)
+        self._input.bind("<Control-KP_Enter>", self._on_ctrl_enter)
+        self._input.bind("<KeyRelease>", lambda e: self._sync_input_height())
+        self._input.bind("<<Paste>>", lambda e: self.root.after(1, self._sync_input_height))
+        for seq in ("<ButtonRelease-1>", "<<Cut>>"):
+            self._input.bind(seq, lambda e: self.root.after(1, self._sync_input_height))
 
         btn_col = tk.Frame(bar, bg=_BG)
         btn_col.pack(side=tk.RIGHT, fill=tk.Y)
@@ -448,7 +532,7 @@ class AssistantApp:
         self._btn_send.pack(fill=tk.X, pady=(0, 2))
 
         tk.Label(
-            btn_col, text="Enter to send\nShift+Enter: newline",
+            btn_col, text="Enter / Ctrl+Enter: send\nShift+Enter: newline",
             font=("Segoe UI", 7), bg=_BG, fg=_FG_DIM, justify=tk.CENTER,
         ).pack()
 
@@ -578,8 +662,11 @@ class AssistantApp:
         self._insert(text + "\n\n", "user_msg")
 
     def append_assistant(self, text: str) -> None:
-        self._insert("Assistant\n", "asst_label")
-        self._insert(text + "\n\n", "asst_msg")
+        self._chat.config(state=tk.NORMAL)
+        self._chat.insert(tk.END, "Assistant\n", ("asst_label",))
+        insert_markdown(self._chat, text, base_tags=("asst_msg",), trailing="\n\n")
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(tk.END)
 
     def append_info(self, text: str) -> None:
         # Detect result summaries from core.py ("Completed N/M operation(s).")
@@ -842,8 +929,166 @@ class AssistantApp:
         self._insert("[Timed out — cancelled]\n\n", "info")
 
     # ===================================================================
+    # TRANSCRIPT TOOLS
+    # ===================================================================
+
+    def _scroll_chat_end(self) -> None:
+        self._chat.see(tk.END)
+
+    def _copy_transcript(self) -> None:
+        try:
+            t = self._chat.get("1.0", tk.END).strip()
+        except tk.TclError:
+            return
+        if not t:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(t)
+
+    def _find_clear_highlight(self) -> None:
+        self._chat.config(state=tk.NORMAL)
+        self._chat.tag_remove("find_hl", "1.0", tk.END)
+        self._chat.config(state=tk.DISABLED)
+
+    def _find_highlight(self, start: str, end: str) -> None:
+        self._chat.config(state=tk.NORMAL)
+        self._chat.tag_remove("find_hl", "1.0", tk.END)
+        self._chat.tag_add("find_hl", start, end)
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(start)
+
+    def _find_next(self, backwards: bool = False) -> None:
+        if not self._find_var:
+            return
+        q = self._find_var.get().strip()
+        if not q:
+            return
+        idx = ""
+        if backwards:
+            if self._find_last_start:
+                try:
+                    start_from = self._chat.index(f"{self._find_last_start}-1c")
+                except tk.TclError:
+                    start_from = tk.END
+            else:
+                start_from = tk.END
+            idx = self._chat.search(q, start_from, "1.0", backwards=True, nocase=True)
+            if not idx and self._find_last_start:
+                idx = self._chat.search(q, tk.END, "1.0", backwards=True, nocase=True)
+        else:
+            start_from = self._find_last_end if self._find_last_end else "1.0"
+            idx = self._chat.search(q, start_from, tk.END, nocase=True)
+            if not idx and self._find_last_start:
+                idx = self._chat.search(q, "1.0", self._find_last_start, nocase=True)
+        if not idx:
+            if hasattr(self, "_find_status"):
+                self._find_status.config(text="Not found")
+            return
+        end = f"{idx}+{len(q)}c"
+        self._find_highlight(idx, end)
+        self._find_last_start = idx
+        self._find_last_end = end
+        if hasattr(self, "_find_status"):
+            self._find_status.config(text="")
+
+    def _open_find_dialog(self) -> None:
+        if self._find_win is not None:
+            try:
+                if self._find_win.winfo_exists():
+                    self._find_win.lift()
+                    self._find_win.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self._find_last_start = None
+        self._find_last_end = None
+        win = tk.Toplevel(self.root)
+        win.title("Find in transcript")
+        win.transient(self.root)
+        win.resizable(False, False)
+        self._find_win = win
+        self._find_var = tk.StringVar()
+
+        row = tk.Frame(win, padx=10, pady=8)
+        row.pack(fill=tk.X)
+        tk.Label(row, text="Find:", font=self._f_ui_sm).pack(side=tk.LEFT)
+        ent = tk.Entry(row, textvariable=self._find_var, width=36, font=self._f_ui)
+        ent.pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
+
+        self._find_status = tk.Label(win, text="", font=self._f_ui_sm, fg=_FG_RISK_MED)
+        self._find_status.pack(anchor=tk.W, padx=10)
+
+        btn_row = tk.Frame(win, padx=10, pady=(0, 10))
+        btn_row.pack(fill=tk.X)
+
+        def do_next() -> None:
+            self._find_next(backwards=False)
+
+        def do_prev() -> None:
+            self._find_next(backwards=True)
+
+        def on_close() -> None:
+            if self._find_var is not None and self._find_trace_id is not None:
+                try:
+                    self._find_var.trace_remove("write", self._find_trace_id)
+                except (tk.TclError, AttributeError, ValueError):
+                    pass
+            self._find_trace_id = None
+            self._find_clear_highlight()
+            self._find_last_start = None
+            self._find_last_end = None
+            self._find_win = None
+            self._find_var = None
+            self._find_close_callback = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        self._find_close_callback = on_close
+
+        tk.Button(btn_row, text="Next", command=do_next, width=10).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btn_row, text="Previous", command=do_prev, width=10).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btn_row, text="Close", command=on_close, width=10).pack(side=tk.LEFT)
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        win.bind("<Escape>", lambda e: on_close())
+        ent.bind("<Return>", lambda e: do_next())
+        ent.bind("<Shift-Return>", lambda e: do_prev())
+
+        def on_query_change(*_a: Any) -> None:
+            self._find_last_start = None
+            self._find_last_end = None
+            self._find_clear_highlight()
+            if hasattr(self, "_find_status"):
+                self._find_status.config(text="")
+
+        self._find_trace_id = self._find_var.trace_add("write", on_query_change)
+        win.after(50, ent.focus_set)
+
+    # ===================================================================
     # INPUT HANDLING
     # ===================================================================
+
+    def _sync_input_height(self) -> None:
+        if self._busy:
+            return
+        try:
+            body = self._input.get("1.0", "end-1c")
+        except tk.TclError:
+            return
+        lines = body.count("\n") + 1 if body else 1
+        h = max(_INPUT_MIN_LINES, min(_INPUT_MAX_LINES, lines))
+        try:
+            cur = int(self._input.cget("height"))
+        except (tk.TclError, ValueError):
+            cur = _INPUT_MIN_LINES
+        if cur != h:
+            self._input.config(height=h)
+
+    def _on_ctrl_enter(self, event: tk.Event) -> str:
+        self.root.after(1, self._on_send)
+        return "break"
 
     def _on_enter(self, event: tk.Event) -> str:
         if not (event.state & 0x1):  # Shift not held

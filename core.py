@@ -30,7 +30,7 @@ from logger import log_event
 from schemas import MUTATING_TOOL_NAMES, SYSTEM_PROMPT, get_server_side_tools, get_tool_definitions
 from safety import is_affirmative_confirmation
 from tools import dispatch_tool
-from xai_client import ChatCompletionResult, ToolCallSpec, chat_completion
+from xai_client import ChatCompletionResult, ToolCallSpec, chat_completion, chat_completion_stream
 
 
 # ---------------------------------------------------------------------------
@@ -437,22 +437,28 @@ def _chat_with_optional_web_tools(
     messages: list[dict[str, Any]],
     base_tools: list[dict[str, Any]],
     sink: OutputSink,
+    *,
+    on_delta: Any = None,
+    stop_event: Any = None,
 ) -> ChatCompletionResult:
     global _WEB_SEARCH_ATTACHED
+
+    def _call(tools: list[dict[str, Any]]) -> ChatCompletionResult:
+        if on_delta is not None:
+            return chat_completion_stream(
+                api_key, model, messages, tools=tools,
+                on_delta=on_delta, stop_event=stop_event,
+            )
+        return chat_completion(api_key, model, messages, tools=tools)
+
     if not web_search_enabled():
-        return chat_completion(api_key, model, messages, tools=base_tools)
+        return _call(base_tools)
     if _WEB_SEARCH_ATTACHED is False:
-        return chat_completion(api_key, model, messages, tools=base_tools)
+        return _call(base_tools)
     if _WEB_SEARCH_ATTACHED is True:
-        return chat_completion(
-            api_key, model, messages,
-            tools=_merge_tool_defs(base_tools, get_server_side_tools()),
-        )
+        return _call(_merge_tool_defs(base_tools, get_server_side_tools()))
     try:
-        result = chat_completion(
-            api_key, model, messages,
-            tools=_merge_tool_defs(base_tools, get_server_side_tools()),
-        )
+        result = _call(_merge_tool_defs(base_tools, get_server_side_tools()))
         _WEB_SEARCH_ATTACHED = True
         return result
     except RuntimeError as e:
@@ -462,7 +468,7 @@ def _chat_with_optional_web_tools(
             "[note] Built-in web_search unavailable; continuing without it. "
             "Set XAI_ENABLE_WEB_SEARCH=0 to silence."
         )
-        return chat_completion(api_key, model, messages, tools=base_tools)
+        return _call(base_tools)
 
 
 # ---------------------------------------------------------------------------
@@ -698,24 +704,42 @@ def _run_turn(
     model = get_xai_model()
     tools = get_tool_definitions()
 
+    # Streaming support — duck-typed so CLI sinks (which lack these) still work.
+    on_delta = getattr(sink, "stream_delta", None)
+    stop_event = getattr(sink, "stop_event", None)
+
     turn_start = len(messages)
     messages.append({"role": "user", "content": user_text})
     log_event("user_message", {"length": len(user_text)}, user_request=user_text)
 
     max_steps = get_max_tool_loops()
     for _ in range(max_steps):
+        # Signal to the sink that a new LLM response is starting.
+        getattr(sink, "start_stream", lambda: None)()
         try:
-            result = _chat_with_optional_web_tools(api_key, model, messages, tools, sink)
+            result = _chat_with_optional_web_tools(
+                api_key, model, messages, tools, sink,
+                on_delta=on_delta, stop_event=stop_event,
+            )
         except RuntimeError as e:
+            getattr(sink, "cancel_stream", lambda: None)()
             sink.error(f"[error] {e}")
             log_event("api_error", {"error": str(e)}, phase="error")
             del messages[turn_start:]
+            return
+
+        # Honour stop requests between LLM calls.
+        if stop_event and stop_event.is_set():
+            getattr(sink, "cancel_stream", lambda: None)()
             return
 
         if result.tool_calls:
             # Show the model's plan/progress text before processing tools
             if result.content and result.content.strip():
                 sink.assistant(result.content.strip())
+            else:
+                # No text preamble — discard any dangling stream header.
+                getattr(sink, "cancel_stream", lambda: None)()
             _process_tool_calls(messages, result.tool_calls, sink, result.content)
             continue
 

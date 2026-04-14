@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, scrolledtext
 from typing import Any
 
@@ -44,7 +45,7 @@ _WIN_W = 960
 _WIN_H = 720
 _MIN_W = 720
 _MIN_H = 520
-_SIDE_W = 210
+_SIDE_W = 220
 _APPROVAL_MAX_ACTIONS_VISIBLE = 8
 
 _BG = "#f3f3f3"
@@ -100,6 +101,10 @@ class GuiSink:
         # Increments with every plan() call so stale approval-card clicks
         # from a timed-out card are silently ignored.
         self._plan_generation: int = 0
+        # Streaming support
+        self.stop_event = threading.Event()
+        self._is_streaming: bool = False
+        self._stream_started: bool = False
 
     def _post(self, fn: Any, *args: Any) -> None:
         """Schedule *fn* on the main thread, silently dropping if shutting down."""
@@ -117,7 +122,37 @@ class GuiSink:
         self._post(self._app.append_error, text)
 
     def assistant(self, text: str) -> None:
-        self._post(self._app.append_assistant, text)
+        if self._is_streaming and self._stream_started:
+            self._is_streaming = False
+            self._stream_started = False
+            self._post(self._app.finalize_assistant_stream, text)
+        else:
+            self._is_streaming = False
+            self._stream_started = False
+            self._post(self._app.append_assistant, text)
+
+    def start_stream(self) -> None:
+        """Mark that the next LLM response is beginning (lazy — header deferred to first delta)."""
+        self._is_streaming = True
+        self._stream_started = False
+
+    def stream_delta(self, text: str) -> None:
+        if not self._is_streaming:
+            return
+        if not self._stream_started:
+            self._stream_started = True
+            self._post(self._app.start_assistant_stream)
+        self._post(self._app.append_stream_delta, text)
+
+    def cancel_stream(self) -> None:
+        if self._is_streaming and self._stream_started:
+            self._post(self._app.cancel_assistant_stream)
+        self._is_streaming = False
+        self._stream_started = False
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.cancel_stream()
 
     def plan(self, card: ApprovalCard) -> None:
         if self._app._shutting_down:
@@ -169,6 +204,8 @@ class AssistantApp:
         self._busy = False
         self._shutting_down = False
         self._sink = GuiSink(self)
+        self._stream_mark: str | None = None
+        self._streaming: bool = False
         self._approval_scroll_widgets: list[tk.Widget] = []
         self._find_win: tk.Toplevel | None = None
         self._find_var: tk.StringVar | None = None
@@ -231,6 +268,20 @@ class AssistantApp:
     def _on_find_shortcut(self, event: tk.Event) -> str | None:
         self._open_find_dialog()
         return "break"
+
+    def _on_link_click(self, event: tk.Event) -> None:
+        idx = self._chat.index(f"@{event.x},{event.y}")
+        ranges = self._chat.tag_ranges("md_link")
+        for i in range(0, len(ranges), 2):
+            start, end = ranges[i], ranges[i + 1]
+            if (self._chat.compare(start, "<=", idx) and
+                    self._chat.compare(idx, "<=", end)):
+                url_range = self._chat.tag_nextrange("md_url_note", end)
+                if url_range:
+                    raw = self._chat.get(url_range[0], url_range[1]).strip()
+                    if raw.startswith("(") and raw.endswith(")"):
+                        webbrowser.open(raw[1:-1])
+                break
 
     # ===================================================================
     # UI CONSTRUCTION
@@ -333,15 +384,15 @@ class AssistantApp:
 
         # User
         c.tag_configure("user_label", foreground=_BTN_PRIMARY_BG,
-                        font=self._f_ui_sm_bold, lmargin1=4, spacing1=6, spacing3=1)
+                        font=self._f_ui_sm_bold, lmargin1=8, spacing1=10, spacing3=2)
         c.tag_configure("user_msg", background=_BG_USER_MSG, font=self._f_ui,
-                        lmargin1=4, lmargin2=4, rmargin=40, spacing3=4)
+                        lmargin1=8, lmargin2=8, rmargin=40, spacing1=5, spacing3=8)
 
         # Assistant
         c.tag_configure("asst_label", foreground=_FG_LABEL,
-                        font=self._f_ui_sm_bold, lmargin1=4, spacing1=6, spacing3=1)
+                        font=self._f_ui_sm_bold, lmargin1=8, spacing1=10, spacing3=2)
         c.tag_configure("asst_msg", background=_BG_ASST_MSG, font=self._f_ui,
-                        lmargin1=4, lmargin2=4, rmargin=40, spacing3=4)
+                        lmargin1=8, lmargin2=8, rmargin=40, spacing1=5, spacing3=8)
 
         # Info / progress / error
         c.tag_configure("info", foreground=_FG_DIM, font=self._f_ui_sm,
@@ -401,6 +452,9 @@ class AssistantApp:
         )
         c.tag_configure("md_rule", foreground=_TURN_SEP_COLOR, font=("Segoe UI", 2))
         c.tag_configure("md_link", foreground=_BTN_PRIMARY_BG, underline=True)
+        c.tag_bind("md_link", "<Button-1>", self._on_link_click)
+        c.tag_bind("md_link", "<Enter>", lambda e: c.config(cursor="hand2"))
+        c.tag_bind("md_link", "<Leave>", lambda e: c.config(cursor=""))
         c.tag_configure("md_url_note", font=self._f_mono_sm, foreground=_FG_DIM)
         c.tag_configure("find_hl", background="#fff59d")
 
@@ -410,9 +464,9 @@ class AssistantApp:
         pad_x = 10
 
         # Model
-        self._side_section(parent, "Model", top_pad=10)
+        self._side_section(parent, "Model", top_pad=14)
         model_frame = tk.Frame(parent, bg=_BG_SIDE)
-        model_frame.pack(fill=tk.X, padx=pad_x, pady=(0, 4))
+        model_frame.pack(fill=tk.X, padx=pad_x, pady=(0, 8))
 
         self._model_var = tk.StringVar(value=self._current_preset())
         self._model_radios: list[tk.Radiobutton] = []
@@ -438,7 +492,7 @@ class AssistantApp:
             bg=_BG_SIDE, fg=_FG, activebackground=_BG_SIDE, selectcolor=_BG_SIDE,
             anchor=tk.W,
         )
-        self._cb_dry.pack(fill=tk.X, padx=pad_x)
+        self._cb_dry.pack(fill=tk.X, padx=pad_x, pady=(4, 0))
         self._sidebar_widgets.append(self._cb_dry)
 
         self._verbose_var = tk.BooleanVar(value=is_verbose())
@@ -448,7 +502,7 @@ class AssistantApp:
             bg=_BG_SIDE, fg=_FG, activebackground=_BG_SIDE, selectcolor=_BG_SIDE,
             anchor=tk.W,
         )
-        self._cb_verbose.pack(fill=tk.X, padx=pad_x)
+        self._cb_verbose.pack(fill=tk.X, padx=pad_x, pady=(4, 0))
         self._sidebar_widgets.append(self._cb_verbose)
 
         # Actions
@@ -485,7 +539,7 @@ class AssistantApp:
                  fg=_FG_LABEL, anchor=tk.W).pack(fill=tk.X, padx=10, pady=(top_pad, 3))
 
     def _side_sep(self, parent: tk.Frame) -> None:
-        tk.Frame(parent, bg=_SEP_COLOR, height=1).pack(fill=tk.X, padx=8, pady=8)
+        tk.Frame(parent, bg=_SEP_COLOR, height=1).pack(fill=tk.X, padx=8, pady=10)
 
     def _side_button(self, parent: tk.Frame, text: str, cmd: Any) -> tk.Button:
         btn = tk.Button(
@@ -604,18 +658,19 @@ class AssistantApp:
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         if busy:
-            self._btn_send.config(state=tk.DISABLED, text="Working...",
-                                  bg="#90a4ae")
+            self._btn_send.config(state=tk.NORMAL, text="\u25a0 Stop",
+                                  bg=_BTN_CANCEL_BG, command=self._on_stop)
             self._chip_busy.config(text="Working...")
-            self._input.config(state=tk.DISABLED, bg=_BG_DISABLED)
+            # Input stays enabled so the user can compose their next message.
             for w in self._sidebar_widgets:
                 try:
                     w.config(state=tk.DISABLED)
                 except tk.TclError:
                     pass
         else:
+            self._sink.stop_event.clear()
             self._btn_send.config(state=tk.NORMAL, text="Send",
-                                  bg=_BTN_PRIMARY_BG)
+                                  bg=_BTN_PRIMARY_BG, command=self._on_send)
             self._chip_busy.config(text="")
             self._input.config(state=tk.NORMAL, bg=_BG_INPUT)
             for w in self._sidebar_widgets:
@@ -625,6 +680,10 @@ class AssistantApp:
                     pass
             self._refresh_undo_indicator()
             self._focus_input()
+
+    def _on_stop(self) -> None:
+        self._sink.stop()
+        self._btn_send.config(state=tk.DISABLED, text="Stopping...", bg="#90a4ae")
 
     # ===================================================================
     # CHAT TRANSCRIPT
@@ -667,6 +726,53 @@ class AssistantApp:
         insert_markdown(self._chat, text, base_tags=("asst_msg",), trailing="\n\n")
         self._chat.config(state=tk.DISABLED)
         self._chat.see(tk.END)
+
+    def start_assistant_stream(self) -> None:
+        """Insert the 'Assistant' label and record the stream start mark."""
+        self._chat.config(state=tk.NORMAL)
+        self._chat.insert(tk.END, "Assistant\n", ("asst_label",))
+        self._stream_mark = self._chat.index(tk.END)
+        self._streaming = True
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(tk.END)
+
+    def append_stream_delta(self, text: str) -> None:
+        """Append a raw token chunk while streaming."""
+        if not self._streaming:
+            return
+        self._chat.config(state=tk.NORMAL)
+        self._chat.insert(tk.END, text, ("asst_msg",))
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(tk.END)
+
+    def finalize_assistant_stream(self, full_text: str) -> None:
+        """Replace the raw streamed text with fully markdown-rendered version."""
+        if not self._streaming or not self._stream_mark:
+            self.append_assistant(full_text)
+            return
+        self._chat.config(state=tk.NORMAL)
+        self._chat.delete(self._stream_mark, tk.END)
+        insert_markdown(self._chat, full_text, base_tags=("asst_msg",), trailing="\n\n")
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(tk.END)
+        self._streaming = False
+        self._stream_mark = None
+
+    def cancel_assistant_stream(self) -> None:
+        """Terminate a stream that was interrupted (Stop button or empty tool preamble)."""
+        if not self._streaming:
+            return
+        self._chat.config(state=tk.NORMAL)
+        if self._stream_mark:
+            raw = self._chat.get(self._stream_mark, tk.END)
+            self._chat.delete(self._stream_mark, tk.END)
+            if raw.strip():
+                insert_markdown(self._chat, raw.rstrip(), base_tags=("asst_msg",), trailing="")
+            self._chat.insert(tk.END, "\n[stopped]\n\n", ("info",))
+        self._chat.config(state=tk.DISABLED)
+        self._chat.see(tk.END)
+        self._streaming = False
+        self._stream_mark = None
 
     def append_info(self, text: str) -> None:
         # Detect result summaries from core.py ("Completed N/M operation(s).")
@@ -1116,6 +1222,7 @@ class AssistantApp:
         finally:
             if not self._shutting_down:
                 try:
+                    self._sink.stop_event.clear()
                     self.root.after(0, self._set_busy, False)
                 except RuntimeError:
                     pass

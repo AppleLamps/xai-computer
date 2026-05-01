@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 # Ensure tests don't pick up real .env
+os.environ.setdefault("XAI_ASSISTANT_SKIP_DOTENV", "1")
 os.environ.setdefault("XAI_API_KEY", "test-key-not-real")
 
 

@@ -7,7 +7,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_SKIP_DOTENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _load_project_dotenv() -> None:
+    """Load this repo's .env, preferring it over inherited shell variables."""
+    if os.environ.get("XAI_ASSISTANT_SKIP_DOTENV", "").strip().lower() in _SKIP_DOTENV_VALUES:
+        return
+    load_dotenv(Path(__file__).with_name(".env"), override=True)
+
+
+_load_project_dotenv()
 
 # ---------------------------------------------------------------------------
 # Available models

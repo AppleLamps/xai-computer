@@ -105,16 +105,7 @@ def get_default_desktop_path() -> Path:
 # ---------------------------------------------------------------------------
 
 
-def get_allowed_roots() -> list[Path]:
-    """
-    Paths under which mutating file operations are permitted.
-    Override with XAI_ASSISTANT_ALLOWED_ROOTS as a semicolon-separated list of absolute paths.
-    """
-    raw = os.environ.get("XAI_ASSISTANT_ALLOWED_ROOTS")
-    if raw:
-        roots = [Path(p.strip()).expanduser().resolve() for p in raw.split(";") if p.strip()]
-        if roots:
-            return roots
+def _default_allowed_roots() -> list[Path]:
     home = Path.home().resolve()
     defaults = [
         get_default_desktop_path(),
@@ -134,6 +125,69 @@ def get_allowed_roots() -> list[Path]:
             seen.add(key)
             out.append(r)
     return out
+
+
+def _settings_path() -> Path:
+    return get_state_dir() / "settings.json"
+
+
+def _load_settings() -> dict:
+    import json
+    try:
+        return json.loads(_settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_settings(data: dict) -> None:
+    import json
+    path = _settings_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def get_allowed_roots() -> list[Path]:
+    """
+    Paths under which mutating file operations are permitted.
+    Precedence: XAI_ASSISTANT_ALLOWED_ROOTS env var > state/settings.json > defaults.
+    """
+    raw = os.environ.get("XAI_ASSISTANT_ALLOWED_ROOTS")
+    if raw:
+        roots = [Path(p.strip()).expanduser().resolve() for p in raw.split(";") if p.strip()]
+        if roots:
+            return roots
+    settings = _load_settings()
+    saved = settings.get("allowed_roots")
+    if isinstance(saved, list) and saved:
+        out: list[Path] = []
+        seen: set[str] = set()
+        for s in saved:
+            try:
+                r = Path(str(s)).expanduser().resolve()
+            except OSError:
+                continue
+            key = str(r).casefold()
+            if key not in seen:
+                seen.add(key)
+                out.append(r)
+        if out:
+            return out
+    return _default_allowed_roots()
+
+
+def set_allowed_roots(paths: list[Path]) -> None:
+    """Persist a new allowed-roots list to state/settings.json."""
+    data = _load_settings()
+    data["allowed_roots"] = [str(Path(p).expanduser().resolve()) for p in paths]
+    _save_settings(data)
+
+
+def reset_allowed_roots() -> None:
+    """Clear any persisted override; revert to defaults."""
+    data = _load_settings()
+    data.pop("allowed_roots", None)
+    _save_settings(data)
 
 
 # ---------------------------------------------------------------------------

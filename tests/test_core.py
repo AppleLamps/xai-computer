@@ -217,6 +217,66 @@ class TestProcessToolCallsConversation:
         assert content.get("blocked") is True
 
 
+class TestToolActivityHooks:
+    """tool_start / tool_end must fire once per dispatch call on both paths."""
+
+    def _make_sink(self, with_hooks: bool = True) -> MagicMock:
+        # `spec` limits attribute access so missing hooks truly appear absent.
+        attrs = ["info", "error", "assistant", "plan", "progress",
+                 "prompt_confirmation"]
+        if with_hooks:
+            attrs += ["tool_start", "tool_end"]
+        sink = MagicMock(spec=attrs)
+        sink.prompt_confirmation.return_value = "yes"
+        return sink
+
+    @patch("core.dispatch_tool", return_value={"ok": True, "files": []})
+    def test_readonly_hooks_fire(self, _mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        tool_calls = [
+            ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/x"}),
+        ]
+        _process_tool_calls([], tool_calls, sink)
+        sink.tool_start.assert_called_once()
+        sink.tool_end.assert_called_once()
+        assert sink.tool_start.call_args[0][0] == "list_directory"
+        assert sink.tool_end.call_args[0] == ("list_directory", True)
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    def test_mutating_hooks_fire(self, _mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        tool_calls = [
+            ToolCallSpec(
+                id="m1", name="move_file",
+                arguments={"source": "a.txt", "destination": "b.txt"},
+            ),
+        ]
+        _process_tool_calls([], tool_calls, sink)
+        sink.tool_start.assert_called_once()
+        sink.tool_end.assert_called_once()
+        assert sink.tool_end.call_args[0] == ("move_file", True)
+
+    @patch("core.dispatch_tool", return_value={"ok": False, "error": "x"})
+    def test_tool_end_reports_failure(self, _mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        tool_calls = [
+            ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/x"}),
+        ]
+        _process_tool_calls([], tool_calls, sink)
+        assert sink.tool_end.call_args[0] == ("list_directory", False)
+
+    @patch("core.dispatch_tool", return_value={"ok": True, "files": []})
+    def test_sink_without_hooks_still_works(self, _mock_dispatch: MagicMock) -> None:
+        """Duck-typed: a sink lacking tool_start/tool_end must not break dispatch."""
+        sink = self._make_sink(with_hooks=False)
+        tool_calls = [
+            ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/x"}),
+        ]
+        # Should complete without raising AttributeError.
+        _process_tool_calls([], tool_calls, sink)
+        sink.progress.assert_called_once()
+
+
 class TestRunTurnRollback:
     def _make_sink(self) -> MagicMock:
         sink = MagicMock()

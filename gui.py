@@ -8,21 +8,29 @@ Launch:  python gui.py
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 import tkinter as tk
+import uuid
 import webbrowser
-from tkinter import messagebox, scrolledtext
+from datetime import datetime, timezone
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext
 from typing import Any
 
 from config import (
     MODELS,
+    get_allowed_roots,
     get_log_dir,
+    get_state_dir,
     get_xai_api_key,
     get_xai_model,
     is_dry_run,
     is_verbose,
+    reset_allowed_roots,
+    set_allowed_roots,
     set_dry_run,
     set_runtime_model,
     set_verbose,
@@ -33,6 +41,12 @@ from schemas import SYSTEM_PROMPT
 from undo import get_history, undo_last
 
 from gui_markdown import insert_markdown
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _DND_AVAILABLE = True
+except ImportError:
+    _DND_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Design tokens
@@ -173,6 +187,15 @@ class GuiSink:
     def progress(self, text: str) -> None:
         self._post(self._app.append_progress, text)
 
+    def tool_start(self, name: str, label: str) -> None:
+        self._post(self._app._set_tool_activity, label)
+
+    def tool_end(self, name: str, ok: bool) -> None:
+        self._post(self._app._set_tool_activity, None)
+
+    def usage(self, data: dict, model: str) -> None:
+        self._post(self._app._record_usage, data, model)
+
     def prompt_confirmation(self, prompt_text: str) -> str:
         return self._confirmation_answer
 
@@ -192,7 +215,7 @@ class GuiSink:
 
 class AssistantApp:
     def __init__(self) -> None:
-        self.root = tk.Tk()
+        self.root = TkinterDnD.Tk() if _DND_AVAILABLE else tk.Tk()
         self.root.title(_APP_TITLE)
         self.root.geometry(f"{_WIN_W}x{_WIN_H}")
         self.root.configure(bg=_BG)
@@ -206,6 +229,13 @@ class AssistantApp:
         self._sink = GuiSink(self)
         self._stream_mark: str | None = None
         self._streaming: bool = False
+        self._welcome_frame: tk.Frame | None = None
+        self._session_id: str = SESSION_ID
+        self._session_created: str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._sessions_list_frame: tk.Frame | None = None
+        self._token_totals: dict[str, int] = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        }
         self._approval_scroll_widgets: list[tk.Widget] = []
         self._find_win: tk.Toplevel | None = None
         self._find_var: tk.StringVar | None = None
@@ -320,6 +350,12 @@ class AssistantApp:
 
         tk.Label(hdr, text=f"Session {SESSION_ID}", font=self._f_mono_sm,
                  bg=_BG_HEADER, fg=_FG_DIM).pack(side=tk.RIGHT)
+
+        self._chip_tokens = tk.Label(
+            hdr, text="0 tokens", font=self._f_mono_sm,
+            bg=_BG_HEADER, fg=_FG_DIM, padx=6,
+        )
+        self._chip_tokens.pack(side=tk.RIGHT, padx=(0, 12))
 
     # ── Body ──
 
@@ -513,9 +549,18 @@ class AssistantApp:
         self._sidebar_widgets.append(self._btn_undo)
         self._btn_history = self._side_button(parent, "Show History", self._on_history)
         self._sidebar_widgets.append(self._btn_history)
-        btn_clear = self._side_button(parent, "Clear Chat", self._on_clear)
+        btn_clear = self._side_button(parent, "New Session", self._on_clear)
         self._sidebar_widgets.append(btn_clear)
+        btn_folders = self._side_button(parent, "Allowed Folders...", self._on_allowed_folders)
+        self._sidebar_widgets.append(btn_folders)
         self._side_button(parent, "Open Logs Folder", self._on_open_logs)
+
+        # Recent Sessions
+        self._side_sep(parent)
+        self._side_section(parent, "Recent Sessions")
+        self._sessions_list_frame = tk.Frame(parent, bg=_BG_SIDE)
+        self._sessions_list_frame.pack(fill=tk.X, padx=pad_x, pady=(0, 4))
+        self._refresh_session_list()
 
         # Undo indicator
         self._side_sep(parent)
@@ -573,6 +618,13 @@ class AssistantApp:
         self._input.bind("<<Paste>>", lambda e: self.root.after(1, self._sync_input_height))
         for seq in ("<ButtonRelease-1>", "<<Cut>>"):
             self._input.bind(seq, lambda e: self.root.after(1, self._sync_input_height))
+
+        if _DND_AVAILABLE:
+            try:
+                self._input.drop_target_register(DND_FILES)
+                self._input.dnd_bind("<<Drop>>", self._on_drop_files)
+            except tk.TclError:
+                pass
 
         btn_col = tk.Frame(bar, bg=_BG)
         btn_col.pack(side=tk.RIGHT, fill=tk.Y)
@@ -685,6 +737,30 @@ class AssistantApp:
         self._sink.stop()
         self._btn_send.config(state=tk.DISABLED, text="Stopping...", bg="#90a4ae")
 
+    def _record_usage(self, data: dict, model: str) -> None:
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            self._token_totals[k] += int(data.get(k) or 0)
+        self._update_token_chip()
+
+    def _update_token_chip(self) -> None:
+        total = self._token_totals.get("total_tokens", 0)
+        if total >= 1_000_000:
+            label = f"{total / 1_000_000:.2f}M tokens"
+        elif total >= 1_000:
+            label = f"{total / 1_000:.1f}k tokens"
+        else:
+            label = f"{total} tokens"
+        self._chip_tokens.config(text=label)
+
+    def _set_tool_activity(self, label: str | None) -> None:
+        if not self._busy:
+            return
+        if label:
+            truncated = label if len(label) <= 60 else label[:57] + "..."
+            self._chip_busy.config(text=f"\u21b3 {truncated}")
+        else:
+            self._chip_busy.config(text="Working...")
+
     # ===================================================================
     # CHAT TRANSCRIPT
     # ===================================================================
@@ -701,21 +777,108 @@ class AssistantApp:
         self._chat.insert(tk.END, "\u2500" * 50 + "\n", "turn_sep")
         self._chat.config(state=tk.DISABLED)
 
+    _EXAMPLE_PROMPTS = [
+        "List what's on my Desktop",
+        "Find files larger than 100 MB in Downloads",
+        "Organize my Desktop by file type",
+        "Show me my 10 most recent Downloads",
+        "Take a screenshot of my screen",
+    ]
+
     def _show_welcome(self) -> None:
+        # Dismiss any existing welcome frame first (idempotent).
+        self._hide_welcome()
+
         info = get_startup_info()
         dry = "  [DRY RUN active]" if info["dry_run"] else ""
         roots = ", ".join(os.path.basename(r) for r in info["allowed_roots"])
-        self._insert(
-            f"Ready.{dry}\n\n"
-            f"  Desktop:  {info['desktop']}\n"
-            f"  Roots:    {roots}\n"
-            f"  Model:    {info['model']}\n\n"
-            f"Type a message below to get started.\n"
-            f"Use the sidebar to switch models, toggle dry-run, or undo.\n",
-            "info",
-        )
+
+        frame = tk.Frame(self._chat_container, bg=_BG_CHAT, padx=20, pady=18)
+        frame.pack(fill=tk.X, before=self._chat)
+
+        tk.Label(
+            frame, text=f"Welcome to xAI Assistant{dry}",
+            font=("Segoe UI", 14, "bold"),
+            bg=_BG_CHAT, fg=_FG, anchor=tk.W,
+        ).pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(
+            frame,
+            text=(
+                f"Desktop: {info['desktop']}    "
+                f"Roots: {roots}    "
+                f"Model: {info['model']}"
+            ),
+            font=self._f_mono_sm, bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+            justify=tk.LEFT, wraplength=800,
+        ).pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(
+            frame, text="Try one of these:",
+            font=self._f_ui_sm_bold, bg=_BG_CHAT, fg=_FG_LABEL, anchor=tk.W,
+        ).pack(fill=tk.X, pady=(0, 6))
+
+        chips = tk.Frame(frame, bg=_BG_CHAT)
+        chips.pack(fill=tk.X)
+        for prompt in self._EXAMPLE_PROMPTS:
+            btn = tk.Button(
+                chips, text=prompt, font=self._f_ui_sm,
+                bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
+                relief=tk.FLAT, padx=10, pady=5, cursor="hand2",
+                command=lambda p=prompt: self._use_prompt(p),
+            )
+            btn.pack(side=tk.TOP, anchor=tk.W, pady=2)
+
+        tk.Label(
+            frame,
+            text="...or type your own message below. "
+                 "Use the sidebar to switch models, toggle dry-run, or undo.",
+            font=self._f_ui_sm, bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+            justify=tk.LEFT, wraplength=800,
+        ).pack(fill=tk.X, pady=(12, 0))
+
+        self._welcome_frame = frame
+
+    def _hide_welcome(self) -> None:
+        if self._welcome_frame is not None:
+            try:
+                self._welcome_frame.destroy()
+            except tk.TclError:
+                pass
+            self._welcome_frame = None
+
+    def _on_drop_files(self, event: Any) -> str:
+        raw = event.data or ""
+        try:
+            # Use Tk's own list splitter — it handles {braced paths} correctly.
+            paths = list(self.root.tk.splitlist(raw))
+        except tk.TclError:
+            paths = [raw]
+        quoted = []
+        for p in paths:
+            p = p.strip().strip("{}")
+            if not p:
+                continue
+            quoted.append(f'"{p}"' if (" " in p or "\t" in p) else p)
+        if not quoted:
+            return ""
+        snippet = " ".join(quoted)
+        current = self._input.get("1.0", tk.END).rstrip()
+        sep = " " if current and not current.endswith((" ", "\n")) else ""
+        self._input.insert(tk.END, f"{sep}{snippet}")
+        self._sync_input_height()
+        self._focus_input()
+        return "break"
+
+    def _use_prompt(self, text: str) -> None:
+        if self._busy:
+            return
+        self._input.delete("1.0", tk.END)
+        self._input.insert("1.0", text)
+        self._on_send()
 
     def append_user(self, text: str) -> None:
+        self._hide_welcome()
         self._insert_turn_separator()
         self._insert("You\n", "user_label")
         self._insert(text + "\n\n", "user_msg")
@@ -1222,8 +1385,13 @@ class AssistantApp:
         finally:
             if not self._shutting_down:
                 try:
+                    self._save_session()
+                except Exception:
+                    pass
+                try:
                     self._sink.stop_event.clear()
                     self.root.after(0, self._set_busy, False)
+                    self.root.after(0, self._refresh_session_list)
                 except RuntimeError:
                     pass
 
@@ -1289,13 +1457,263 @@ class AssistantApp:
             else:
                 self.append_info(f"  {i}. [{ts}] {action}{undone}")
 
+    # ===================================================================
+    # SESSION PERSISTENCE
+    # ===================================================================
+
+    _SESSIONS_MAX_VISIBLE = 8
+    _SESSION_TITLE_MAX = 60
+
+    def _sessions_dir(self) -> Path:
+        d = Path(get_state_dir()) / "sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _session_path(self, session_id: str) -> Path:
+        return self._sessions_dir() / f"{session_id}.json"
+
+    def _session_title(self) -> str:
+        for msg in self._messages:
+            if msg.get("role") == "user":
+                text = str(msg.get("content", "")).strip().splitlines()
+                first = text[0] if text else ""
+                if len(first) > self._SESSION_TITLE_MAX:
+                    return first[: self._SESSION_TITLE_MAX - 1] + "\u2026"
+                return first or "(untitled)"
+        return "(untitled)"
+
+    def _save_session(self) -> None:
+        # Skip if only the system prompt is present.
+        if len([m for m in self._messages if m.get("role") != "system"]) == 0:
+            return
+        payload = {
+            "id": self._session_id,
+            "created": self._session_created,
+            "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "title": self._session_title(),
+            "messages": self._messages,
+            "token_totals": dict(self._token_totals),
+        }
+        path = self._session_path(self._session_id)
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+    def _list_sessions(self) -> list[dict[str, Any]]:
+        d = self._sessions_dir()
+        entries: list[dict[str, Any]] = []
+        for p in d.glob("*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            data["_path"] = p
+            data["_mtime"] = p.stat().st_mtime
+            entries.append(data)
+        entries.sort(key=lambda e: e.get("_mtime", 0), reverse=True)
+        return entries
+
+    def _refresh_session_list(self) -> None:
+        if self._sessions_list_frame is None:
+            return
+        for child in self._sessions_list_frame.winfo_children():
+            child.destroy()
+        sessions = self._list_sessions()[: self._SESSIONS_MAX_VISIBLE]
+        if not sessions:
+            tk.Label(
+                self._sessions_list_frame, text="(none yet)",
+                font=self._f_mono_sm, bg=_BG_SIDE, fg=_FG_DIM, anchor=tk.W,
+            ).pack(fill=tk.X)
+            return
+        for entry in sessions:
+            sid = entry.get("id", "?")
+            title = entry.get("title") or "(untitled)"
+            is_current = sid == self._session_id
+            label = title if not is_current else f"\u25cf {title}"
+            btn = tk.Button(
+                self._sessions_list_frame,
+                text=label,
+                command=lambda p=entry["_path"]: self._load_session(p),
+                font=self._f_ui_sm,
+                bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
+                relief=tk.FLAT, padx=6, pady=2, cursor="hand2",
+                anchor=tk.W, justify=tk.LEFT,
+                wraplength=_SIDE_W - 28,
+            )
+            btn.pack(fill=tk.X, pady=1)
+
+    def _rebuild_transcript(self) -> None:
+        self._chat.config(state=tk.NORMAL)
+        self._chat.delete("1.0", tk.END)
+        self._chat.config(state=tk.DISABLED)
+        for msg in self._messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            if not content or not isinstance(content, str):
+                continue
+            if role == "user":
+                self._insert_turn_separator()
+                self._insert("You\n", "user_label")
+                self._insert(content + "\n\n", "user_msg")
+            elif role == "assistant":
+                self.append_assistant(content)
+
+    def _load_session(self, path: Path) -> None:
+        if self._busy:
+            self.append_info("Cannot switch sessions while working.")
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            self.append_error(f"[error] Could not load session: {e}")
+            return
+        # Save current session first so no work is lost.
+        self._save_session()
+        self._session_id = data.get("id") or path.stem
+        self._session_created = data.get("created") or (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        self._messages = list(data.get("messages") or [])
+        # Ensure a system prompt exists at the front.
+        if not self._messages or self._messages[0].get("role") != "system":
+            self._messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        saved_totals = data.get("token_totals") or {}
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            self._token_totals[k] = int(saved_totals.get(k) or 0)
+        self._update_token_chip()
+        self._hide_welcome()
+        self._rebuild_transcript()
+        self._refresh_session_list()
+
     def _on_clear(self) -> None:
+        # Save the outgoing session before starting a fresh one.
+        self._save_session()
         self._chat.config(state=tk.NORMAL)
         self._chat.delete("1.0", tk.END)
         self._chat.config(state=tk.DISABLED)
         self._messages.clear()
         self._messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        self._session_id = uuid.uuid4().hex[:12]
+        self._session_created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for k in self._token_totals:
+            self._token_totals[k] = 0
+        self._update_token_chip()
         self._show_welcome()
+        self._refresh_session_list()
+
+    def _on_allowed_folders(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Allowed Folders")
+        dlg.configure(bg=_BG)
+        dlg.transient(self.root)
+        dlg.geometry("560x360")
+
+        tk.Label(
+            dlg,
+            text="The assistant can only read or modify files under these folders.",
+            font=self._f_ui_sm, bg=_BG, fg=_FG_LABEL, anchor=tk.W, justify=tk.LEFT,
+            wraplength=540,
+        ).pack(fill=tk.X, padx=12, pady=(12, 6))
+
+        list_frame = tk.Frame(dlg, bg=_BG)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox = tk.Listbox(
+            list_frame, font=self._f_mono_sm, bg=_BG_INPUT, fg=_FG,
+            relief=tk.SOLID, borderwidth=1, activestyle="none",
+            yscrollcommand=scrollbar.set,
+        )
+        listbox.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        roots: list[Path] = [Path(p) for p in get_allowed_roots()]
+
+        def refresh() -> None:
+            listbox.delete(0, tk.END)
+            for r in roots:
+                listbox.insert(tk.END, str(r))
+
+        def on_add() -> None:
+            chosen = filedialog.askdirectory(parent=dlg, title="Add allowed folder")
+            if not chosen:
+                return
+            p = Path(chosen).expanduser().resolve()
+            if any(str(r).casefold() == str(p).casefold() for r in roots):
+                return
+            roots.append(p)
+            refresh()
+
+        def on_remove() -> None:
+            sel = list(listbox.curselection())
+            for idx in reversed(sel):
+                del roots[idx]
+            refresh()
+
+        def on_reset() -> None:
+            if not messagebox.askyesno(
+                "Reset", "Revert to default folders (Desktop, Documents, Downloads)?",
+                parent=dlg,
+            ):
+                return
+            reset_allowed_roots()
+            roots.clear()
+            roots.extend(get_allowed_roots())
+            refresh()
+
+        def on_save() -> None:
+            if not roots:
+                messagebox.showwarning(
+                    "Empty", "Keep at least one folder so the assistant has somewhere to work.",
+                    parent=dlg,
+                )
+                return
+            if os.environ.get("XAI_ASSISTANT_ALLOWED_ROOTS"):
+                messagebox.showwarning(
+                    "Env override",
+                    "XAI_ASSISTANT_ALLOWED_ROOTS is set in the environment and takes "
+                    "precedence. Unset it for these saved folders to apply.",
+                    parent=dlg,
+                )
+            set_allowed_roots(roots)
+            self._update_header()
+            self.append_info(f"Allowed folders updated ({len(roots)}).")
+            dlg.destroy()
+
+        refresh()
+
+        btns = tk.Frame(dlg, bg=_BG)
+        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+        for text, cmd in (
+            ("Add...", on_add),
+            ("Remove", on_remove),
+            ("Reset", on_reset),
+        ):
+            tk.Button(
+                btns, text=text, command=cmd, font=self._f_ui_sm,
+                bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
+                relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
+            ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(
+            btns, text="Save", command=on_save, font=self._f_approval_btn,
+            bg=_BTN_PRIMARY_BG, fg="white", activebackground="#1976d2",
+            activeforeground="white", relief=tk.FLAT, padx=14, pady=4, cursor="hand2",
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            btns, text="Cancel", command=dlg.destroy, font=self._f_ui_sm,
+            bg=_BTN_SIDE_BG, fg=_FG, relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
+        ).pack(side=tk.RIGHT, padx=(0, 6))
 
     def _on_open_logs(self) -> None:
         log_dir = get_log_dir()

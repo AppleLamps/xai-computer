@@ -32,6 +32,18 @@ class ChatCompletionResult:
     content: str | None
     tool_calls: list[ToolCallSpec]
     raw: dict[str, Any]
+    usage: dict[str, int] | None = None
+
+
+def _extract_usage(body: dict[str, Any]) -> dict[str, int] | None:
+    u = body.get("usage")
+    if not isinstance(u, dict):
+        return None
+    return {
+        "prompt_tokens": int(u.get("prompt_tokens") or 0),
+        "completion_tokens": int(u.get("completion_tokens") or 0),
+        "total_tokens": int(u.get("total_tokens") or 0),
+    }
 
 
 def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCallSpec]:
@@ -102,6 +114,7 @@ def chat_completion(
         content=content if isinstance(content, str) else None,
         tool_calls=tool_calls,
         raw=body,
+        usage=_extract_usage(body),
     )
 
 
@@ -128,6 +141,7 @@ def chat_completion_stream(
         "tool_choice": "auto",
         "temperature": temperature,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -144,6 +158,7 @@ def chat_completion_stream(
     content_acc: list[str] = []
     # tool_calls_acc: index -> {id, name, arguments_parts}
     tool_calls_acc: dict[int, dict[str, Any]] = {}
+    usage_data: dict[str, int] | None = None
 
     for attempt in range(_MAX_RETRIES):
         try:
@@ -161,6 +176,10 @@ def chat_completion_stream(
                         chunk = json.loads(payload_str)
                     except json.JSONDecodeError:
                         continue
+                    # xAI emits a final chunk containing usage with empty choices.
+                    chunk_usage = _extract_usage(chunk)
+                    if chunk_usage:
+                        usage_data = chunk_usage
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
@@ -218,4 +237,5 @@ def chat_completion_stream(
         content=full_content,
         tool_calls=tool_call_specs,
         raw={},
+        usage=usage_data,
     )

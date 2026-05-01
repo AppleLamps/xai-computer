@@ -8,6 +8,7 @@ GUI) can plug in its own rendering.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -228,6 +229,27 @@ def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
     if tool in ("click", "type_text", "press_hotkey", "stop_process", "browser_click", "browser_fill", "browser_press", "browser_download"):
         return "high"
     return "low"
+
+
+def _dispatch_with_activity(
+    sink: Any,
+    name: str,
+    arguments: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    """Run dispatch_tool while notifying the sink via optional tool_start/tool_end hooks."""
+    start = getattr(sink, "tool_start", None)
+    end = getattr(sink, "tool_end", None)
+    if start:
+        start(name, label)
+    ok = False
+    try:
+        res = dispatch_tool(name, arguments)
+        ok = isinstance(res, dict) and bool(res.get("ok"))
+        return res
+    finally:
+        if end:
+            end(name, ok)
 
 
 def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
@@ -508,8 +530,9 @@ def _process_tool_calls(
     while i < n:
         tc = tool_calls[i]
         if tc.name not in MUTATING_TOOL_NAMES:
-            sink.progress(f"  ↳ {_tool_progress_label(tc.name, tc.arguments)}")
-            res = dispatch_tool(tc.name, tc.arguments)
+            label = _tool_progress_label(tc.name, tc.arguments)
+            sink.progress(f"  ↳ {label}")
+            res = _dispatch_with_activity(sink, tc.name, tc.arguments, label)
             messages.append(_tool_result_message(tc.id, res))
             if res.get("ok") is False and not res.get("blocked"):
                 log_event("tool_error", {"tool": tc.name, "error": res.get("error")}, phase="error")
@@ -552,7 +575,9 @@ def _process_tool_calls(
         results: dict[str, dict[str, Any]] = {}
         for b in block:
             if approved:
-                res = dispatch_tool(b.name, b.arguments)
+                res = _dispatch_with_activity(
+                    sink, b.name, b.arguments, _tool_progress_label(b.name, b.arguments)
+                )
                 if res.get("ok"):
                     executed += 1
                     if is_verbose():
@@ -585,7 +610,9 @@ def _process_tool_calls(
                 if is_affirmative_confirmation(retry_answer):
                     log_event("retry_batch", {"count": len(failed_block)}, phase="retry")
                     for b in failed_block:
-                        res = dispatch_tool(b.name, b.arguments)
+                        res = _dispatch_with_activity(
+                            sink, b.name, b.arguments, _tool_progress_label(b.name, b.arguments)
+                        )
                         was_ok = results[b.id].get("ok", False)
                         results[b.id] = res
                         if res.get("ok") and not was_ok:
@@ -707,6 +734,8 @@ def _run_turn(
     # Streaming support — duck-typed so CLI sinks (which lack these) still work.
     on_delta = getattr(sink, "stream_delta", None)
     stop_event = getattr(sink, "stop_event", None)
+    if not isinstance(stop_event, threading.Event):
+        stop_event = None
 
     turn_start = len(messages)
     messages.append({"role": "user", "content": user_text})
@@ -727,6 +756,12 @@ def _run_turn(
             log_event("api_error", {"error": str(e)}, phase="error")
             del messages[turn_start:]
             return
+
+        # Report token usage to the sink if it tracks such things.
+        if result.usage:
+            _usage_cb = getattr(sink, "usage", None)
+            if _usage_cb:
+                _usage_cb(result.usage, model)
 
         # Honour stop requests between LLM calls.
         if stop_event and stop_event.is_set():

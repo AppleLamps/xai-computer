@@ -91,3 +91,13 @@ class TestSessionRoundTrip:
         # Most recently saved first.
         assert ids[0] == second
         assert first in ids
+
+    def test_stream_finalize_replaces_raw_markdown(self, app) -> None:
+        text = "**Files and folders:**\n\n- one.txt"
+        app.start_assistant_stream()
+        app.append_stream_delta(text)
+        app.finalize_assistant_stream(text)
+
+        rendered = app._chat.get("1.0", "end-1c")
+        assert "**Files and folders:**" not in rendered
+        assert rendered.count("Files and folders:") == 1

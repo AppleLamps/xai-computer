@@ -412,6 +412,30 @@ def build_approval_card(tool_calls: list[ToolCallSpec]) -> ApprovalCard:
 _WEB_SEARCH_ATTACHED: bool | None = None
 
 
+def _runtime_system_prompt() -> str:
+    roots = "\n".join(f"- {p}" for p in get_allowed_roots())
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Runtime context:\n"
+        f"- Default Desktop path: {get_default_desktop_path()}\n"
+        f"- Allowed local roots:\n{roots}\n\n"
+        "Tool-selection guidance:\n"
+        "- For Desktop questions, use the default Desktop path above directly.\n"
+        "- Prefer dedicated read-only tools such as list_directory, recent_files, "
+        "largest_files, search_files, and directory_tree for inspection tasks.\n"
+        "- Do not use run_command just to discover common paths, list files, or sort "
+        "recent files when a dedicated read-only tool can do the job."
+    )
+
+
+def _ensure_runtime_system_prompt(messages: list[dict[str, Any]]) -> None:
+    prompt = _runtime_system_prompt()
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = prompt
+    else:
+        messages.insert(0, {"role": "system", "content": prompt})
+
+
 def _build_assistant_tool_message(
     tool_calls: list[ToolCallSpec],
     assistant_content: str | None = None,
@@ -628,30 +652,31 @@ def _process_tool_calls(
                             log_event("tool_error", {"tool": b.name, "error": res.get("error")}, phase="error")
 
         if approved:
-            # Try structured summary; fall back to plain text
-            structured_summary = _try_structured_summary(block, executed)
-            if structured_summary:
-                sink.info(structured_summary)
-            else:
-                sink.info(f"Completed {executed}/{len(block)} operation(s).")
+            sink.info(_format_execution_summary(block, results))
 
         i = j
 
 
-def _try_structured_summary(block: list[ToolCallSpec], executed: int) -> str | None:
-    """Attempt to get a structured execution summary. Returns formatted string or None."""
-    try:
-        from xai_structured import summarize_execution
-        results = [{"ok": True}] * executed + [{"ok": False}] * (len(block) - executed)
-        summary = summarize_execution(results, dry_run=is_dry_run())
-        if summary:
-            parts = [f"Completed {summary['actions_completed']}/{len(block)} operation(s)."]
-            if summary.get("one_line_summary"):
-                parts.append(summary["one_line_summary"])
-            return "  ".join(parts)
-    except Exception:
-        pass
-    return None
+def _format_execution_summary(
+    block: list[ToolCallSpec],
+    results: dict[str, dict[str, Any]],
+) -> str:
+    completed = sum(1 for b in block if results.get(b.id, {}).get("ok"))
+    failed = [
+        results.get(b.id, {})
+        for b in block
+        if not results.get(b.id, {}).get("ok")
+        and not results.get(b.id, {}).get("declined")
+    ]
+    parts = [f"Completed {completed}/{len(block)} operation(s)."]
+    if failed:
+        parts.append(f"{len(failed)} failed.")
+        first_error = str(failed[0].get("error") or "").strip()
+        if first_error:
+            if len(first_error) > 160:
+                first_error = first_error[:157] + "..."
+            parts.append(f"First error: {first_error}")
+    return "  ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +756,8 @@ def _run_turn(
     api_key = get_xai_api_key()
     model = get_xai_model()
     tools = get_tool_definitions()
+    original_messages = [dict(m) for m in messages]
+    _ensure_runtime_system_prompt(messages)
 
     # Streaming support — duck-typed so CLI sinks (which lack these) still work.
     on_delta = getattr(sink, "stream_delta", None)
@@ -755,7 +782,7 @@ def _run_turn(
             getattr(sink, "cancel_stream", lambda: None)()
             sink.error(f"[error] {e}")
             log_event("api_error", {"error": str(e)}, phase="error")
-            del messages[turn_start:]
+            messages[:] = original_messages
             return
 
         # Report token usage to the sink if it tracks such things.
@@ -789,7 +816,7 @@ def _run_turn(
     else:
         sink.error("[error] Tool loop limit reached; stopping this turn.")
         log_event("tool_loop_limit", {}, phase="error")
-        del messages[turn_start:]
+        messages[:] = original_messages
 
 
 def get_startup_info() -> dict[str, Any]:

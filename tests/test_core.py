@@ -9,6 +9,7 @@ from core import (
     PlannedAction,
     _action_label,
     _action_risk,
+    _format_execution_summary,
     _process_tool_calls,
     _run_turn,
     _tool_progress_label,
@@ -101,6 +102,24 @@ class TestToolProgressLabel:
     def test_screenshot_label(self) -> None:
         label = _tool_progress_label("take_screenshot", {})
         assert "Capturing screenshot" in label
+
+
+class TestExecutionSummary:
+    def test_failed_action_summary_is_plain_and_specific(self) -> None:
+        block = [ToolCallSpec(id="c1", name="run_command", arguments={"command": "bad"})]
+        summary = _format_execution_summary(
+            block,
+            {"c1": {"ok": False, "error": "working directory outside allowed roots"}},
+        )
+        assert summary.startswith("Completed 0/1 operation(s).")
+        assert "1 failed" in summary
+        assert "working directory outside allowed roots" in summary
+
+    def test_success_summary_is_concise(self) -> None:
+        block = [ToolCallSpec(id="m1", name="move_file", arguments={})]
+        assert _format_execution_summary(block, {"m1": {"ok": True}}) == (
+            "Completed 1/1 operation(s)."
+        )
 
 
 class TestProcessToolCallsConversation:

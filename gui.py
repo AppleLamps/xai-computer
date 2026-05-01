@@ -998,7 +998,10 @@ class AssistantApp:
         """Insert the 'Assistant' label and record the stream start mark."""
         self._chat.config(state=tk.NORMAL)
         self._chat.insert(tk.END, "Assistant\n", ("asst_label",))
-        self._stream_mark = self._chat.index(tk.END)
+        # Text.insert(END, ...) inserts before Tk's implicit trailing newline,
+        # while END points after it. Mark end-1c so finalize/cancel removes
+        # the raw streamed text instead of leaving it before the mark.
+        self._stream_mark = self._chat.index("end-1c")
         self._streaming = True
         self._chat.config(state=tk.DISABLED)
         self._chat.see(tk.END)
@@ -1018,7 +1021,7 @@ class AssistantApp:
             self.append_assistant(full_text)
             return
         self._chat.config(state=tk.NORMAL)
-        self._chat.delete(self._stream_mark, tk.END)
+        self._chat.delete(self._stream_mark, "end-1c")
         insert_markdown(self._chat, full_text, base_tags=("asst_msg",), trailing="\n\n")
         self._chat.config(state=tk.DISABLED)
         self._chat.see(tk.END)
@@ -1031,8 +1034,8 @@ class AssistantApp:
             return
         self._chat.config(state=tk.NORMAL)
         if self._stream_mark:
-            raw = self._chat.get(self._stream_mark, tk.END)
-            self._chat.delete(self._stream_mark, tk.END)
+            raw = self._chat.get(self._stream_mark, "end-1c")
+            self._chat.delete(self._stream_mark, "end-1c")
             if raw.strip():
                 insert_markdown(self._chat, raw.rstrip(), base_tags=("asst_msg",), trailing="")
             self._chat.insert(tk.END, "\n[stopped]\n\n", ("info",))
@@ -1057,12 +1060,9 @@ class AssistantApp:
     def _insert_result_summary(self, summary_text: str) -> None:
         """Render the post-execution summary in a distinct result block."""
         dry = " (dry run)" if is_dry_run() else ""
-        undo_hint = "  Use Undo Last in the sidebar to reverse." if not is_dry_run() else ""
 
         self._insert(f"Result{dry}\n", "result_hdr")
         self._insert(f"  {summary_text}\n", "result_line")
-        if undo_hint:
-            self._insert(f"  {undo_hint}\n", "result_line")
         self._insert("\n", "info")
 
     # ===================================================================

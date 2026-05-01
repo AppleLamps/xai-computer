@@ -4,11 +4,53 @@ from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from config import is_dry_run
 from logger import log_event
 from shell_guard import validate_working_dir
+
+
+@dataclass(frozen=True)
+class ProcessLaunchVerdict:
+    ok: bool
+    executable: str
+    reason: str = ""
+
+
+_BLOCKED_PROCESS_EXECUTABLES: frozenset[str] = frozenset({
+    # Shells and script hosts
+    "cmd", "powershell", "pwsh", "bash", "sh",
+    "python", "python3", "py", "node", "npm", "npx",
+    "wscript", "cscript", "mshta",
+    # System modification / control
+    "reg", "regedit", "rundll32", "regsvr32", "schtasks",
+    "sc", "wmic", "dism", "sfc", "bcdedit", "bcdboot",
+    # Package/download vectors
+    "pip", "pip3", "curl", "wget", "bitsadmin",
+})
+
+
+def _process_executable_name(executable: str) -> str:
+    cleaned = executable.strip().strip('"').strip("'")
+    if not cleaned:
+        return ""
+    return Path(cleaned).stem.casefold()
+
+
+def classify_process_launch(executable: str) -> ProcessLaunchVerdict:
+    name = _process_executable_name(executable)
+    if not name:
+        return ProcessLaunchVerdict(False, "", "Executable is required.")
+    if name in _BLOCKED_PROCESS_EXECUTABLES:
+        return ProcessLaunchVerdict(
+            False,
+            name,
+            f"Executable '{name}' is blocked for start_process; use the constrained run_command tool where appropriate.",
+        )
+    return ProcessLaunchVerdict(True, name)
 
 
 def _load_psutil() -> Any:
@@ -44,6 +86,19 @@ def list_processes(query: str | None = None, limit: int = 25) -> dict[str, Any]:
 
 def start_process(executable: str, args: list[str] | None = None, working_dir: str | None = None) -> dict[str, Any]:
     args = args or []
+    verdict = classify_process_launch(executable)
+    if not verdict.ok:
+        log_event(
+            "start_process_blocked",
+            {"executable": verdict.executable, "reason": verdict.reason},
+            phase="blocked",
+        )
+        return {
+            "ok": False,
+            "blocked": True,
+            "error": f"Process launch blocked: {verdict.reason}",
+            "executable": verdict.executable,
+        }
     try:
         cwd = validate_working_dir(working_dir)
     except (PermissionError, ValueError, OSError) as e:

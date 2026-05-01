@@ -26,6 +26,14 @@ class TestBrowserSession:
         assert result["ok"] is True
         page.goto.assert_called_once()
 
+    @pytest.mark.parametrize("url", ["file:///C:/secret.txt", "about:blank", "", "ftp://example.com/file.txt"])
+    def test_browser_navigate_rejects_non_http_urls(self, url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        page = MagicMock()
+        monkeypatch.setattr(browser_tools, "_page", lambda: page)
+        result = browser_tools.browser_navigate(url)
+        assert result["ok"] is False
+        page.goto.assert_not_called()
+
     def test_browser_extract_text_defaults_to_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
         locator = MagicMock(inner_text=lambda: "hello")
         page = MagicMock(locator=lambda selector: locator)
@@ -83,6 +91,15 @@ class TestBrowserSession:
         result = browser_tools.browser_download(url="https://example.com/file.txt")
         assert result["ok"] is True
         assert page.goto.call_count == 1
+
+    @pytest.mark.parametrize("url", ["file:///C:/secret.txt", "about:blank", "", "ftp://example.com/file.txt"])
+    def test_browser_download_rejects_non_http_urls(self, url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        page = MagicMock()
+        monkeypatch.setattr(browser_tools, "_page", lambda: page)
+        result = browser_tools.browser_download(url=url)
+        assert result["ok"] is False
+        page.goto.assert_not_called()
+        page.expect_download.assert_not_called()
 
     def test_browser_navigate_dry_run(self) -> None:
         set_dry_run(True)

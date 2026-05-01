@@ -224,7 +224,9 @@ def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
                 return "high"
             return "medium"  # safe-tier shell commands are still medium risk
         return "high"
-    if tool in ("focus_window", "start_process", "browser_navigate", "replace_in_file", "append_file", "apply_patch"):
+    if tool == "start_process":
+        return "high"
+    if tool in ("focus_window", "browser_navigate", "replace_in_file", "append_file", "apply_patch"):
         return "medium"
     if tool in ("click", "type_text", "press_hotkey", "stop_process", "browser_click", "browser_fill", "browser_press", "browser_download"):
         return "high"
@@ -641,7 +643,6 @@ def _try_structured_summary(block: list[ToolCallSpec], executed: int) -> str | N
     try:
         from xai_structured import summarize_execution
         results = [{"ok": True}] * executed + [{"ok": False}] * (len(block) - executed)
-        has_shell = any(b.name == "run_command" for b in block)
         summary = summarize_execution(results, dry_run=is_dry_run())
         if summary:
             parts = [f"Completed {summary['actions_completed']}/{len(block)} operation(s)."]

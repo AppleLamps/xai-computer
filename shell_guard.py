@@ -148,7 +148,6 @@ _BLOCKED_GIT_SUBCOMMANDS: frozenset[str] = frozenset({
 _CHAINING_PATTERN = re.compile(r"[;&|]{1,2}")
 _REDIRECT_PATTERN = re.compile(r"[<>]{1,2}")
 _SUBSHELL_PATTERN = re.compile(r"\$\(|`")
-_BACKTICK_PATTERN = re.compile(r"`")
 
 # System paths that commands must never reference
 _BLOCKED_PATHS: list[str] = [
@@ -212,7 +211,6 @@ def _extract_executable(command: str) -> str:
 def classify_command(command: str, extra_allowlist: list[str] | None = None) -> CommandVerdict:
     """Classify a command into blocked / safe / risky. Deterministic, no LLM."""
 
-    raw = command
     normalized = _normalize(command)
 
     if not normalized:

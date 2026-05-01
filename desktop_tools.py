@@ -59,12 +59,12 @@ def _load_mss() -> Any:
     return mss
 
 
-def _load_pillow() -> tuple[Any, Any]:
+def _load_pillow() -> Any:
     try:
         from PIL import Image
     except ImportError as e:  # pragma: no cover
         raise RuntimeError("Pillow is required for image processing.") from e
-    return Image, Image
+    return Image
 
 
 def _load_ocr_engine() -> Any:
@@ -103,7 +103,7 @@ def _load_win32() -> tuple[Any, Any, Any, Any]:
 def _crop_region(path: Path, region: dict[str, int] | None) -> tuple[Path, bool]:
     if not region:
         return path, False
-    Image, _ = _load_pillow()
+    Image = _load_pillow()
     with Image.open(path) as img:
         box = (
             int(region["x"]),

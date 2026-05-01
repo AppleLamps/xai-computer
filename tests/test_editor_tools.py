@@ -23,6 +23,18 @@ class TestReadFileRange:
         assert "hello world" in result["content"]
         assert "second line" in result["content"]
 
+    def test_rejects_too_large_line_range(self, sample_files: Path) -> None:
+        result = editor_tools.read_file_range(str(sample_files / "notes.txt"), 1, 6000)
+        assert result["ok"] is False
+        assert "range too large" in result["error"].lower()
+
+    def test_rejects_large_file(self, sample_files: Path) -> None:
+        target = sample_files / "large.txt"
+        target.write_text("x" * 10_000_001, encoding="utf-8")
+        result = editor_tools.read_file_range(str(target), 1, 1)
+        assert result["ok"] is False
+        assert "too large" in result["error"].lower()
+
 
 class TestAppendFile:
     def test_appends_existing_file(self, sample_files: Path) -> None:
@@ -67,6 +79,28 @@ class TestReplaceInFile:
         result = editor_tools.replace_in_file(str(sample_files / "notes.txt"), "missing", "new")
         assert result["ok"] is False
 
+    def test_repeated_edits_have_distinct_undo_backups(self, sample_files: Path) -> None:
+        from undo import undo_last
+
+        target = sample_files / "notes.txt"
+        original = target.read_text(encoding="utf-8")
+
+        first = editor_tools.replace_in_file(str(target), "second line", "second edit")
+        second = editor_tools.replace_in_file(str(target), "third line", "third edit")
+
+        assert first["ok"] is True
+        assert second["ok"] is True
+        assert first["backup_path"] != second["backup_path"]
+        assert Path(first["backup_path"]).exists()
+        assert Path(second["backup_path"]).exists()
+
+        assert undo_last()["ok"] is True
+        assert "third line" in target.read_text(encoding="utf-8")
+        assert "second edit" in target.read_text(encoding="utf-8")
+
+        assert undo_last()["ok"] is True
+        assert target.read_text(encoding="utf-8") == original
+
 
 class TestApplyPatch:
     def test_applies_single_hunk(self, sample_files: Path) -> None:
@@ -95,6 +129,30 @@ class TestApplyPatch:
         )
         result = editor_tools.apply_patch(str(target), diff)
         assert result["ok"] is False
+
+    def test_empty_diff_fails(self, sample_files: Path) -> None:
+        target = sample_files / "notes.txt"
+        result = editor_tools.apply_patch(str(target), "--- a/notes.txt\n+++ b/notes.txt\n")
+        assert result["ok"] is False
+        assert "no hunks" in result["error"].lower()
+
+    def test_multi_file_diff_fails(self, sample_files: Path) -> None:
+        target = sample_files / "notes.txt"
+        diff = (
+            "--- a/notes.txt\n"
+            "+++ b/notes.txt\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-hello world\n"
+            "+HELLO WORLD\n"
+            "--- a/other.txt\n"
+            "+++ b/other.txt\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        result = editor_tools.apply_patch(str(target), diff)
+        assert result["ok"] is False
+        assert "multi-file" in result["error"].lower()
 
     def test_patch_target_keeps_leading_b_chars(self, sample_files: Path) -> None:
         target = sample_files / "beta.txt"

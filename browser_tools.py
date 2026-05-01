@@ -11,6 +11,7 @@ from logger import SESSION_ID, log_event
 from shell_guard import redact_secrets
 
 _DEFAULT_TIMEOUT_MS = 10_000
+_ALLOWED_URL_SCHEMES = ("http://", "https://")
 
 
 def _downloads_dir() -> Path:
@@ -19,10 +20,13 @@ def _downloads_dir() -> Path:
     return path
 
 
-def _traces_dir() -> Path:
-    path = get_state_dir() / "browser_traces" / SESSION_ID
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def _validate_http_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("URL is required.")
+    if not cleaned.lower().startswith(_ALLOWED_URL_SCHEMES):
+        raise ValueError("Only http(s) URLs are allowed.")
+    return cleaned
 
 
 @dataclass
@@ -63,11 +67,15 @@ def _page() -> Any:
 
 
 def browser_navigate(url: str) -> dict[str, Any]:
+    try:
+        target_url = _validate_http_url(url)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     if is_dry_run():
-        return {"ok": True, "dry_run": True, "url": url}
+        return {"ok": True, "dry_run": True, "url": target_url}
     try:
         page = _page()
-        page.goto(url, wait_until="domcontentloaded")
+        page.goto(target_url, wait_until="domcontentloaded")
         final_url = page.url
     except RuntimeError as e:
         return {"ok": False, "error": str(e)}
@@ -151,18 +159,24 @@ def browser_download(
 ) -> dict[str, Any]:
     if not url and not click_selector:
         return {"ok": False, "error": "Provide url, click_selector, or both."}
+    target_url: str | None = None
+    if url is not None:
+        try:
+            target_url = _validate_http_url(url)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
     if is_dry_run():
-        return {"ok": True, "dry_run": True, "url": url, "click_selector": click_selector}
+        return {"ok": True, "dry_run": True, "url": target_url, "click_selector": click_selector}
     try:
         page = _page()
         timeout_ms = max(100, int(timeout_sec * 1000))
-        if url and click_selector:
-            page.goto(url, wait_until="domcontentloaded")
+        if target_url and click_selector:
+            page.goto(target_url, wait_until="domcontentloaded")
         with page.expect_download(timeout=timeout_ms) as download_info:
             if click_selector:
                 page.click(click_selector, timeout=timeout_ms)
-            elif url:
-                page.goto(url, wait_until="domcontentloaded")
+            elif target_url:
+                page.goto(target_url, wait_until="domcontentloaded")
         download = download_info.value
         suggested = download.suggested_filename
         save_path = _downloads_dir() / suggested
@@ -171,5 +185,5 @@ def browser_download(
         return {"ok": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Failed downloading file: {e}"}
-    log_event("browser_download", {"path": str(save_path), "selector": click_selector, "url": url}, phase="executed")
-    return {"ok": True, "path": str(save_path), "selector": click_selector, "url": url}
+    log_event("browser_download", {"path": str(save_path), "selector": click_selector, "url": target_url}, phase="executed")
+    return {"ok": True, "path": str(save_path), "selector": click_selector, "url": target_url}

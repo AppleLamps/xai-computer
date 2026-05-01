@@ -146,6 +146,36 @@ class TestUndoWrite:
         bak = target.with_suffix(".txt.bak")
         assert not bak.exists()
 
+    def test_repeated_overwrites_have_distinct_undo_backups(
+        self,
+        sample_files: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from undo import undo_last
+
+        undo_file = sample_files / "undo_test.jsonl"
+        monkeypatch.setattr("undo._undo_path", lambda: undo_file)
+
+        target = sample_files / "notes.txt"
+        original_content = target.read_text()
+
+        first = write_file(str(target), "first overwrite", overwrite=True)
+        second = write_file(str(target), "second overwrite", overwrite=True)
+
+        assert first["ok"] is True
+        assert second["ok"] is True
+        assert first["backup_path"] != second["backup_path"]
+        assert Path(first["backup_path"]).exists()
+        assert Path(second["backup_path"]).exists()
+
+        undo_latest = undo_last()
+        assert undo_latest["ok"] is True
+        assert target.read_text() == "first overwrite"
+
+        undo_previous = undo_last()
+        assert undo_previous["ok"] is True
+        assert target.read_text() == original_content
+
 
 # ---------------------------------------------------------------------------
 # Content validation

@@ -161,6 +161,10 @@ def chat_completion_stream(
     usage_data: dict[str, int] | None = None
 
     for attempt in range(_MAX_RETRIES):
+        attempt_content_acc: list[str] = []
+        attempt_tool_calls_acc: dict[int, dict[str, Any]] = {}
+        attempt_usage_data: dict[str, int] | None = None
+        emitted_delta = False
         try:
             with urllib.request.urlopen(req, timeout=timeout_sec, context=ctx) as resp:
                 for raw_line in resp:
@@ -179,7 +183,7 @@ def chat_completion_stream(
                     # xAI emits a final chunk containing usage with empty choices.
                     chunk_usage = _extract_usage(chunk)
                     if chunk_usage:
-                        usage_data = chunk_usage
+                        attempt_usage_data = chunk_usage
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
@@ -188,16 +192,17 @@ def chat_completion_stream(
                     # Content delta
                     text_chunk = delta.get("content")
                     if text_chunk:
-                        content_acc.append(text_chunk)
+                        attempt_content_acc.append(text_chunk)
+                        emitted_delta = True
                         if on_delta:
                             on_delta(text_chunk)
 
                     # Tool-call delta accumulation
                     for tc_delta in (delta.get("tool_calls") or []):
                         idx = tc_delta.get("index", 0)
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {"id": "", "name": "", "args": []}
-                        entry = tool_calls_acc[idx]
+                        if idx not in attempt_tool_calls_acc:
+                            attempt_tool_calls_acc[idx] = {"id": "", "name": "", "args": []}
+                        entry = attempt_tool_calls_acc[idx]
                         if tc_delta.get("id"):
                             entry["id"] = tc_delta["id"]
                         fn = tc_delta.get("function") or {}
@@ -205,14 +210,18 @@ def chat_completion_stream(
                             entry["name"] = fn["name"]
                         if fn.get("arguments"):
                             entry["args"].append(fn["arguments"])
+                        emitted_delta = True
+            content_acc = attempt_content_acc
+            tool_calls_acc = attempt_tool_calls_acc
+            usage_data = attempt_usage_data
             break  # success — exit retry loop
         except urllib.error.HTTPError as e:
             is_last = attempt == _MAX_RETRIES - 1
-            if e.code not in _RETRYABLE_HTTP_CODES or is_last:
+            if emitted_delta or e.code not in _RETRYABLE_HTTP_CODES or is_last:
                 err_text = e.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"xAI HTTP {e.code}: {err_text}") from e
         except urllib.error.URLError as e:
-            if attempt == _MAX_RETRIES - 1:
+            if emitted_delta or attempt == _MAX_RETRIES - 1:
                 raise RuntimeError(f"xAI connection error: {e}") from e
         time.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
 

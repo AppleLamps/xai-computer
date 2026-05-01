@@ -23,6 +23,7 @@ import browser_tools
 import desktop_tools
 import editor_tools
 import process_tools
+from backup_utils import unique_backup_path
 from config import get_default_desktop_path, is_dry_run, set_last_working_folder
 from logger import log_event
 from safety import (
@@ -919,7 +920,7 @@ def write_file(path: str, content: str, overwrite: bool = False) -> dict[str, An
     # Backup before overwrite
     backup_path: str | None = None
     if file_exists and overwrite:
-        bak = fp.with_suffix(fp.suffix + ".bak")
+        bak = unique_backup_path(fp)
         try:
             shutil.copy2(str(fp), str(bak))
             backup_path = str(bak)

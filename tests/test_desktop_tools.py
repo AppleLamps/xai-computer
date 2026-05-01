@@ -74,7 +74,7 @@ class TestOCR:
             def __call__(self, path: str) -> tuple[list[tuple[list[list[int]], str, float]], None]:
                 return [([[0, 0], [1, 0], [1, 1], [0, 1]], "hello", 0.99)], None
 
-        monkeypatch.setattr(desktop_tools, "_load_pillow", lambda: (SimpleNamespace(open=lambda p: FakeImageCtx()), None))
+        monkeypatch.setattr(desktop_tools, "_load_pillow", lambda: SimpleNamespace(open=lambda p: FakeImageCtx()))
         monkeypatch.setattr(desktop_tools, "_load_ocr_engine", lambda: FakeOCR)
         result = desktop_tools.ocr_image(str(image), region={"x": 0, "y": 0, "width": 10, "height": 10})
         assert result["ok"] is True

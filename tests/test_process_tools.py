@@ -31,7 +31,7 @@ class TestStartProcess:
         monkeypatch.setattr("shell_guard.get_allowed_roots", lambda: [sample_files])
         set_dry_run(True)
         try:
-            result = process_tools.start_process("python", ["--version"], working_dir=str(sample_files))
+            result = process_tools.start_process("notepad.exe", [], working_dir=str(sample_files))
             assert result["ok"] is True
             assert result["dry_run"] is True
         finally:
@@ -41,9 +41,27 @@ class TestStartProcess:
         monkeypatch.setattr("shell_guard.get_allowed_roots", lambda: [sample_files])
         fake_proc = MagicMock(pid=1234)
         monkeypatch.setattr(process_tools.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
-        result = process_tools.start_process("python", ["--version"], working_dir=str(sample_files))
+        result = process_tools.start_process("notepad.exe", [], working_dir=str(sample_files))
         assert result["ok"] is True
         assert result["pid"] == 1234
+
+    @pytest.mark.parametrize("exe", [
+        "cmd.exe", "powershell.exe", "pwsh.exe", "python.exe",
+        "wscript.exe", "mshta.exe", "reg.exe", "pip.exe",
+    ])
+    def test_blocks_shell_script_and_system_executables(
+        self,
+        exe: str,
+        sample_files: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("shell_guard.get_allowed_roots", lambda: [sample_files])
+        popen = MagicMock()
+        monkeypatch.setattr(process_tools.subprocess, "Popen", popen)
+        result = process_tools.start_process(exe, [], working_dir=str(sample_files))
+        assert result["ok"] is False
+        assert result["blocked"] is True
+        popen.assert_not_called()
 
 
 class TestStopAndWait:

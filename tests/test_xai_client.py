@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from xai_client import ChatCompletionResult, _MAX_RETRIES, chat_completion
+from xai_client import ChatCompletionResult, _MAX_RETRIES, chat_completion, chat_completion_stream
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,6 +36,35 @@ def _url_open_ok(_req: object, *, timeout: float, context: object) -> MagicMock:
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+class _StreamResponse:
+    def __init__(self, lines: list[bytes], error: Exception | None = None) -> None:
+        self._lines = lines
+        self._error = error
+
+    def __enter__(self) -> "_StreamResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    def __iter__(self):
+        for line in self._lines:
+            yield line
+        if self._error is not None:
+            raise self._error
+
+
+def _sse_chunk(payload: dict) -> bytes:
+    return f"data: {json.dumps(payload)}\n".encode("utf-8")
+
+
+def _content_stream(text: str, *, error: Exception | None = None) -> _StreamResponse:
+    return _StreamResponse([
+        _sse_chunk({"choices": [{"delta": {"content": text}}]}),
+        b"data: [DONE]\n",
+    ], error=error)
 
 
 # ---------------------------------------------------------------------------
@@ -128,3 +157,59 @@ class TestChatCompletionRetry:
         assert mock_sleep.call_count == 2
         delays = [c.args[0] for c in mock_sleep.call_args_list]
         assert delays[1] == delays[0] * 2  # doubling
+
+
+class TestChatCompletionStreamRetry:
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_retries_before_any_stream_delta(self, mock_open: MagicMock, mock_sleep: MagicMock) -> None:
+        mock_open.side_effect = [
+            URLError("connection dropped"),
+            _content_stream("Hello"),
+        ]
+        deltas: list[str] = []
+
+        result = chat_completion_stream("key", "model", [], [], on_delta=deltas.append)
+
+        assert result.content == "Hello"
+        assert deltas == ["Hello"]
+        assert mock_open.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_does_not_retry_after_content_delta(self, mock_open: MagicMock, mock_sleep: MagicMock) -> None:
+        mock_open.return_value = _StreamResponse([
+            _sse_chunk({"choices": [{"delta": {"content": "partial"}}]}),
+        ], error=URLError("connection dropped"))
+        deltas: list[str] = []
+
+        with pytest.raises(RuntimeError, match="xAI connection error"):
+            chat_completion_stream("key", "model", [], [], on_delta=deltas.append)
+
+        assert deltas == ["partial"]
+        assert mock_open.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_does_not_retry_after_tool_call_delta(self, mock_open: MagicMock, mock_sleep: MagicMock) -> None:
+        mock_open.return_value = _StreamResponse([
+            _sse_chunk({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {"name": "list_directory", "arguments": "{\"path\""},
+                        }],
+                    },
+                }],
+            }),
+        ], error=URLError("connection dropped"))
+
+        with pytest.raises(RuntimeError, match="xAI connection error"):
+            chat_completion_stream("key", "model", [], [])
+
+        assert mock_open.call_count == 1
+        mock_sleep.assert_not_called()

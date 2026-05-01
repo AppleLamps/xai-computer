@@ -40,6 +40,9 @@ class TestPlannedAction:
     def test_risk_desktop_click_is_high(self) -> None:
         assert _action_risk("click", {"x": 1, "y": 2}) == "high"
 
+    def test_risk_start_process_is_high(self) -> None:
+        assert _action_risk("start_process", {"executable": "notepad.exe"}) == "high"
+
 
 class TestApprovalCard:
     def test_build_from_tool_calls(self) -> None:

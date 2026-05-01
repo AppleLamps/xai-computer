@@ -8,17 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backup_utils import unique_backup_path
 from config import is_dry_run
 from logger import log_event
 from safety import require_allowed_path, require_allowed_path_readonly
 from undo import record_write_file
 
 _WRITE_MAX_BYTES = 500_000
+_MAX_READ_BYTES = 10_000_000
+_MAX_LINE_RANGE = 5_000
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def _backup_path(fp: Path) -> Path:
-    return fp.with_suffix(fp.suffix + ".bak")
+    return unique_backup_path(fp)
 
 
 def _write_with_backup(fp: Path, content: str) -> dict[str, Any]:
@@ -57,11 +60,25 @@ def read_file_range(path: str, start_line: int, end_line: int) -> dict[str, Any]
         return {"ok": False, "error": f"Not a file: {fp}"}
     if start_line < 1 or end_line < start_line:
         return {"ok": False, "error": "Invalid line range."}
+    if end_line - start_line + 1 > _MAX_LINE_RANGE:
+        return {"ok": False, "error": f"Line range too large (max {_MAX_LINE_RANGE} lines)."}
     try:
-        lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+        size = fp.stat().st_size
     except OSError as e:
         return {"ok": False, "error": str(e)}
-    selected = lines[start_line - 1:end_line]
+    if size > _MAX_READ_BYTES:
+        return {"ok": False, "error": f"File too large to read by range: {size} bytes."}
+    try:
+        selected: list[str] = []
+        with fp.open("r", encoding="utf-8", errors="replace") as f:
+            for line_number, line in enumerate(f, 1):
+                if line_number < start_line:
+                    continue
+                if line_number > end_line:
+                    break
+                selected.append(line.rstrip("\n").rstrip("\r"))
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
     return {
         "ok": True,
         "path": str(fp),
@@ -126,12 +143,15 @@ def _parse_unified_diff(unified_diff: str) -> tuple[str | None, list[_Hunk]] | d
 
     lines = unified_diff.splitlines(keepends=True)
     target_path: str | None = None
+    target_paths: list[str] = []
     hunks: list[_Hunk] = []
     current: _Hunk | None = None
     for line in lines:
         if line.startswith("--- ") or line.startswith("+++ "):
             if line.startswith("+++ "):
                 target_path = _strip_diff_prefix(line[4:].strip())
+                if target_path not in ("/dev/null", "dev/null"):
+                    target_paths.append(target_path)
             continue
         match = _HUNK_RE.match(line)
         if match:
@@ -149,6 +169,9 @@ def _parse_unified_diff(unified_diff: str) -> tuple[str | None, list[_Hunk]] | d
         if current is None:
             continue
         current.lines.append(line)
+    unique_targets = {p for p in target_paths if p}
+    if len(unique_targets) > 1:
+        return {"ok": False, "error": "Multi-file diffs are not supported."}
     return target_path, hunks
 
 
@@ -193,6 +216,8 @@ def apply_patch(path: str, unified_diff: str) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     target_path, hunks = parsed
+    if not hunks:
+        return {"ok": False, "error": "Patch contains no hunks."}
     if target_path and Path(target_path).name != fp.name:
         return {"ok": False, "error": "Patch target does not match provided path."}
     try:

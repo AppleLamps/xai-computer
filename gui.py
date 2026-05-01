@@ -8,7 +8,6 @@ Launch:  python gui.py
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import threading
@@ -38,6 +37,7 @@ from config import (
 from core import ApprovalCard, get_startup_info, handle_user_turn
 from logger import SESSION_ID
 from schemas import SYSTEM_PROMPT
+from session_store import SessionStore
 from undo import get_history, undo_last
 
 from gui_markdown import insert_markdown
@@ -66,8 +66,14 @@ _BG = "#f3f3f3"
 _BG_SIDE = "#eaeaea"
 _BG_CHAT = "#ffffff"
 _BG_INPUT = "#ffffff"
-_BG_HEADER = "#e2e2e2"
-_BG_DISABLED = "#f0f0f0"
+_BG_TOP_BAR = "#17212b"
+_BG_TOP_CHIP = "#233140"
+_BG_SIDE_BUTTON_HOVER = "#cfd8dc"
+_BG_SIDE_BUTTON_ACTIVE = "#d6e4f2"
+_BG_WELCOME = "#f7f9fb"
+_BG_WELCOME_CHIP = "#eef3f8"
+_BG_APPROVAL_ROW = "#fffaf2"
+_BG_INPUT_FOCUS = "#f8fbff"
 
 _BG_USER_MSG = "#e8f0fe"
 _BG_ASST_MSG = "#f6f6f6"
@@ -83,8 +89,11 @@ _FG_RISK_MED = "#d84315"
 _FG_RISK_LOW = "#2e7d32"
 
 _BTN_APPROVE_BG = "#2e7d32"
+_BTN_APPROVE_HOVER_BG = "#1b5e20"
 _BTN_CANCEL_BG = "#b71c1c"
+_BTN_CANCEL_HOVER_BG = "#8f1212"
 _BTN_PRIMARY_BG = "#1565c0"
+_BTN_PRIMARY_HOVER_BG = "#0d47a1"
 _BTN_SIDE_BG = "#dcdcdc"
 
 _SEP_COLOR = "#c8c8c8"
@@ -92,7 +101,9 @@ _TURN_SEP_COLOR = "#e0e0e0"
 _APPROVAL_BORDER = "#ef6c00"
 _APPROVAL_BORDER_HIGH = "#b71c1c"
 _FG_RISK_HIGH = "#b71c1c"
-_BUSY_COLOR = "#ef6c00"
+_STATUS_READY = "#2e7d32"
+_STATUS_BUSY = "#ef6c00"
+_STATUS_INFO = "#1565c0"
 
 
 # How long the worker thread waits for the user to approve/cancel before
@@ -232,7 +243,9 @@ class AssistantApp:
         self._welcome_frame: tk.Frame | None = None
         self._session_id: str = SESSION_ID
         self._session_created: str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._session_store = SessionStore(Path(get_state_dir()) / "sessions")
         self._sessions_list_frame: tk.Frame | None = None
+        self._session_buttons: list[tk.Widget] = []
         self._token_totals: dict[str, int] = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         }
@@ -260,7 +273,7 @@ class AssistantApp:
         self._refresh_undo_indicator()
         self._show_welcome()
         self.root.after(100, self._focus_input)
-        self.root.after(120, self._sync_input_height)
+        self.root.after(120, self._sync_input_state)
 
     # ── Window close ──
     def _on_close(self) -> None:
@@ -325,35 +338,68 @@ class AssistantApp:
 
     # ── Header ──
 
+    def _hover_button(self, button: tk.Button, normal_bg: str, hover_bg: str) -> None:
+        self._set_hover_colors(button, normal_bg, hover_bg, apply=False)
+
+        def on_enter(_event: tk.Event) -> None:
+            if str(button.cget("state")) != tk.DISABLED:
+                button.config(bg=getattr(button, "_hover_bg", hover_bg))
+
+        def on_leave(_event: tk.Event) -> None:
+            if str(button.cget("state")) != tk.DISABLED:
+                button.config(bg=getattr(button, "_normal_bg", normal_bg))
+
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
+
+    def _set_hover_colors(
+        self,
+        button: tk.Button,
+        normal_bg: str,
+        hover_bg: str,
+        *,
+        apply: bool = True,
+    ) -> None:
+        setattr(button, "_normal_bg", normal_bg)
+        setattr(button, "_hover_bg", hover_bg)
+        if apply and str(button.cget("state")) != tk.DISABLED:
+            button.config(bg=normal_bg)
+
     def _build_header(self) -> None:
-        hdr = tk.Frame(self.root, bg=_BG_HEADER, padx=10, pady=5)
+        hdr = tk.Frame(self.root, bg=_BG_TOP_BAR, padx=12, pady=8)
         hdr.pack(fill=tk.X)
 
-        left = tk.Frame(hdr, bg=_BG_HEADER)
+        left = tk.Frame(hdr, bg=_BG_TOP_BAR)
         left.pack(side=tk.LEFT)
 
+        tk.Label(
+            left, text="xai-computer", font=("Segoe UI", 12, "bold"),
+            bg=_BG_TOP_BAR, fg="#ffffff", padx=2,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+
         self._chip_model = tk.Label(left, text="", font=self._f_header,
-                                    bg=_BG_HEADER, fg=_FG_LABEL, padx=2)
-        self._chip_model.pack(side=tk.LEFT, padx=(0, 14))
+                                    bg=_BG_TOP_CHIP, fg="#e8edf2", padx=8, pady=2)
+        self._chip_model.pack(side=tk.LEFT, padx=(0, 8))
 
         self._chip_dry = tk.Label(left, text="", font=self._f_header,
-                                  bg=_BG_HEADER, fg=_FG_DIM, padx=2)
-        self._chip_dry.pack(side=tk.LEFT, padx=(0, 14))
+                                  bg=_BG_TOP_CHIP, fg="#e8edf2", padx=8, pady=2)
+        self._chip_dry.pack(side=tk.LEFT, padx=(0, 8))
 
         self._chip_mode = tk.Label(left, text="", font=self._f_header,
-                                   bg=_BG_HEADER, fg=_FG_DIM, padx=2)
-        self._chip_mode.pack(side=tk.LEFT, padx=(0, 14))
+                                   bg=_BG_TOP_CHIP, fg="#e8edf2", padx=8, pady=2)
+        self._chip_mode.pack(side=tk.LEFT, padx=(0, 8))
 
         self._chip_busy = tk.Label(left, text="", font=("Segoe UI", 9, "bold"),
-                                   bg=_BG_HEADER, fg=_BUSY_COLOR, padx=2)
+                                   bg=_BG_TOP_BAR, fg="#ffcc80", padx=2)
         self._chip_busy.pack(side=tk.LEFT)
 
-        tk.Label(hdr, text=f"Session {SESSION_ID}", font=self._f_mono_sm,
-                 bg=_BG_HEADER, fg=_FG_DIM).pack(side=tk.RIGHT)
+        self._chip_session = tk.Label(hdr, text="", font=self._f_mono_sm,
+                                      bg=_BG_TOP_BAR, fg="#b0bec5")
+        self._chip_session.pack(side=tk.RIGHT)
 
         self._chip_tokens = tk.Label(
             hdr, text="0 tokens", font=self._f_mono_sm,
-            bg=_BG_HEADER, fg=_FG_DIM, padx=6,
+            bg=_BG_TOP_CHIP, fg="#dce3ea", padx=8, pady=2,
         )
         self._chip_tokens.pack(side=tk.RIGHT, padx=(0, 12))
 
@@ -371,21 +417,27 @@ class AssistantApp:
         bar = tk.Frame(self._chat_container, bg=_BG_CHAT, padx=6, pady=4)
         bar.pack(fill=tk.X)
         bf = ("Segoe UI", 9)
-        tk.Button(
+        btn_latest = tk.Button(
             bar, text="\u2193 Latest", font=bf, command=self._scroll_chat_end,
             bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
-        ).pack(side=tk.RIGHT, padx=(4, 0))
-        tk.Button(
+        )
+        btn_latest.pack(side=tk.RIGHT, padx=(4, 0))
+        btn_find = tk.Button(
             bar, text="Find\u2026", font=bf, command=self._open_find_dialog,
             bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
-        ).pack(side=tk.RIGHT, padx=(4, 0))
-        tk.Button(
+        )
+        btn_find.pack(side=tk.RIGHT, padx=(4, 0))
+        btn_copy = tk.Button(
             bar, text="Copy all", font=bf, command=self._copy_transcript,
             bg=_BG_CHAT, fg=_FG, relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
-        ).pack(side=tk.RIGHT, padx=(4, 0))
+        )
+        btn_copy.pack(side=tk.RIGHT, padx=(4, 0))
+        self._hover_button(btn_latest, _BG_CHAT, "#eef3f8")
+        self._hover_button(btn_find, _BG_CHAT, "#eef3f8")
+        self._hover_button(btn_copy, _BG_CHAT, "#eef3f8")
         tk.Label(
-            bar, text="Transcript  \u00b7  Ctrl+F find  \u00b7  Ctrl+End latest",
-            font=("Segoe UI", 8), bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+            bar, text="Transcript", font=("Segoe UI", 9, "bold"),
+            bg=_BG_CHAT, fg=_FG_LABEL, anchor=tk.W,
         ).pack(side=tk.LEFT)
 
         self._chat = scrolledtext.ScrolledText(
@@ -500,7 +552,16 @@ class AssistantApp:
         pad_x = 10
 
         # Model
-        self._side_section(parent, "Model", top_pad=14)
+        tk.Label(
+            parent, text="Workspace", font=("Segoe UI", 11, "bold"),
+            bg=_BG_SIDE, fg=_FG, anchor=tk.W,
+        ).pack(fill=tk.X, padx=10, pady=(14, 2))
+        tk.Label(
+            parent, text="Local assistant controls", font=self._f_ui_sm,
+            bg=_BG_SIDE, fg=_FG_DIM, anchor=tk.W,
+        ).pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self._side_section(parent, "Model")
         model_frame = tk.Frame(parent, bg=_BG_SIDE)
         model_frame.pack(fill=tk.X, padx=pad_x, pady=(0, 8))
 
@@ -553,7 +614,8 @@ class AssistantApp:
         self._sidebar_widgets.append(btn_clear)
         btn_folders = self._side_button(parent, "Allowed Folders...", self._on_allowed_folders)
         self._sidebar_widgets.append(btn_folders)
-        self._side_button(parent, "Open Logs Folder", self._on_open_logs)
+        btn_logs = self._side_button(parent, "Open Logs Folder", self._on_open_logs)
+        self._sidebar_widgets.append(btn_logs)
 
         # Recent Sessions
         self._side_sep(parent)
@@ -580,8 +642,8 @@ class AssistantApp:
         self._status_label.pack(fill=tk.X, padx=pad_x, pady=(4, 8))
 
     def _side_section(self, parent: tk.Frame, title: str, top_pad: int = 0) -> None:
-        tk.Label(parent, text=title, font=self._f_ui_sm_bold, bg=_BG_SIDE,
-                 fg=_FG_LABEL, anchor=tk.W).pack(fill=tk.X, padx=10, pady=(top_pad, 3))
+        tk.Label(parent, text=title.upper(), font=("Segoe UI", 8, "bold"), bg=_BG_SIDE,
+                 fg=_FG_DIM, anchor=tk.W).pack(fill=tk.X, padx=10, pady=(top_pad, 4))
 
     def _side_sep(self, parent: tk.Frame) -> None:
         tk.Frame(parent, bg=_SEP_COLOR, height=1).pack(fill=tk.X, padx=8, pady=10)
@@ -590,34 +652,50 @@ class AssistantApp:
         btn = tk.Button(
             parent, text=text, command=cmd, font=self._f_ui_sm,
             bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
-            relief=tk.FLAT, padx=8, pady=3, cursor="hand2", anchor=tk.W,
+            relief=tk.FLAT, padx=10, pady=5, cursor="hand2", anchor=tk.W,
         )
-        btn.pack(fill=tk.X, padx=10, pady=1)
+        btn.pack(fill=tk.X, padx=10, pady=2)
+        self._hover_button(btn, _BTN_SIDE_BG, _BG_SIDE_BUTTON_HOVER)
         return btn
 
     # ── Input bar ──
 
     def _build_input_bar(self) -> None:
-        # Separator
         tk.Frame(self.root, bg=_SEP_COLOR, height=1).pack(fill=tk.X, side=tk.BOTTOM)
 
-        bar = tk.Frame(self.root, bg=_BG, padx=10, pady=8)
-        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        status_row = tk.Frame(self.root, bg=_BG, padx=10)
+        status_row.pack(fill=tk.X, side=tk.BOTTOM, pady=(6, 0))
+        self._input_status = tk.Label(
+            status_row, text="Ready", font=self._f_ui_sm,
+            bg=_BG, fg=_STATUS_READY, anchor=tk.W,
+        )
+        self._input_status.pack(side=tk.LEFT)
+        self._input_count = tk.Label(
+            status_row, text="0 chars", font=self._f_mono_sm,
+            bg=_BG, fg=_FG_DIM, anchor=tk.E,
+        )
+        self._input_count.pack(side=tk.RIGHT)
+
+        bar = tk.Frame(self.root, bg=_BG, padx=10)
+        bar.pack(fill=tk.X, side=tk.BOTTOM, pady=(4, 8))
 
         self._input = tk.Text(
             bar, height=_INPUT_MIN_LINES, font=self._f_ui, bg=_BG_INPUT, fg=_FG,
             relief=tk.SOLID, borderwidth=1, padx=8, pady=6, wrap=tk.WORD,
-            insertbackground=_FG,
+            insertbackground=_FG, highlightthickness=1,
+            highlightbackground="#bcc7d1", highlightcolor=_BTN_PRIMARY_BG,
         )
         self._input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
         self._input.bind("<Return>", self._on_enter)
         self._input.bind("<Shift-Return>", lambda e: None)
         self._input.bind("<Control-Return>", self._on_ctrl_enter)
         self._input.bind("<Control-KP_Enter>", self._on_ctrl_enter)
-        self._input.bind("<KeyRelease>", lambda e: self._sync_input_height())
-        self._input.bind("<<Paste>>", lambda e: self.root.after(1, self._sync_input_height))
+        self._input.bind("<KeyRelease>", lambda e: self._sync_input_state())
+        self._input.bind("<FocusIn>", lambda e: self._input.config(bg=_BG_INPUT_FOCUS))
+        self._input.bind("<FocusOut>", lambda e: self._input.config(bg=_BG_INPUT))
+        self._input.bind("<<Paste>>", lambda e: self.root.after(1, self._sync_input_state))
         for seq in ("<ButtonRelease-1>", "<<Cut>>"):
-            self._input.bind(seq, lambda e: self.root.after(1, self._sync_input_height))
+            self._input.bind(seq, lambda e: self.root.after(1, self._sync_input_state))
 
         if _DND_AVAILABLE:
             try:
@@ -636,11 +714,13 @@ class AssistantApp:
             relief=tk.FLAT, cursor="hand2",
         )
         self._btn_send.pack(fill=tk.X, pady=(0, 2))
+        self._hover_button(self._btn_send, _BTN_PRIMARY_BG, _BTN_PRIMARY_HOVER_BG)
 
         tk.Label(
-            btn_col, text="Enter / Ctrl+Enter: send\nShift+Enter: newline",
+            btn_col, text="Enter sends\nShift+Enter newline",
             font=("Segoe UI", 7), bg=_BG, fg=_FG_DIM, justify=tk.CENTER,
         ).pack()
+        self._sync_input_state()
 
     # ===================================================================
     # HEADER / STATUS
@@ -663,13 +743,15 @@ class AssistantApp:
         self._chip_model.config(text=f"Model: {short}")
 
         if is_dry_run():
-            self._chip_dry.config(text="DRY RUN", fg=_FG_RISK_MED,
-                                  font=("Segoe UI", 9, "bold"))
+            self._chip_dry.config(text="Dry run", fg="#ffcc80",
+                                  bg="#3c2f1f", font=("Segoe UI", 9, "bold"))
         else:
-            self._chip_dry.config(text="Live", fg=_FG_DIM, font=self._f_header)
+            self._chip_dry.config(text="Live", fg="#c8e6c9",
+                                  bg="#1f3a2a", font=self._f_header)
 
         mode = "Verbose" if is_verbose() else "Concise"
         self._chip_mode.config(text=mode)
+        self._chip_session.config(text=f"Session {self._session_id}")
 
         info = get_startup_info()
         roots_short = [os.path.basename(r) for r in info["allowed_roots"]]
@@ -710,22 +792,30 @@ class AssistantApp:
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         if busy:
+            self._set_hover_colors(
+                self._btn_send, _BTN_CANCEL_BG, _BTN_CANCEL_HOVER_BG, apply=False,
+            )
             self._btn_send.config(state=tk.NORMAL, text="\u25a0 Stop",
                                   bg=_BTN_CANCEL_BG, command=self._on_stop)
             self._chip_busy.config(text="Working...")
+            self._set_input_status("Working", _STATUS_BUSY)
             # Input stays enabled so the user can compose their next message.
-            for w in self._sidebar_widgets:
+            for w in self._sidebar_widgets + self._session_buttons:
                 try:
                     w.config(state=tk.DISABLED)
                 except tk.TclError:
                     pass
         else:
             self._sink.stop_event.clear()
+            self._set_hover_colors(
+                self._btn_send, _BTN_PRIMARY_BG, _BTN_PRIMARY_HOVER_BG, apply=False,
+            )
             self._btn_send.config(state=tk.NORMAL, text="Send",
                                   bg=_BTN_PRIMARY_BG, command=self._on_send)
             self._chip_busy.config(text="")
             self._input.config(state=tk.NORMAL, bg=_BG_INPUT)
-            for w in self._sidebar_widgets:
+            self._sync_input_state()
+            for w in self._sidebar_widgets + self._session_buttons:
                 try:
                     w.config(state=tk.NORMAL)
                 except tk.TclError:
@@ -735,7 +825,9 @@ class AssistantApp:
 
     def _on_stop(self) -> None:
         self._sink.stop()
+        self._set_hover_colors(self._btn_send, "#90a4ae", "#90a4ae", apply=False)
         self._btn_send.config(state=tk.DISABLED, text="Stopping...", bg="#90a4ae")
+        self._set_input_status("Stopping current response", _STATUS_BUSY)
 
     def _record_usage(self, data: dict, model: str) -> None:
         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -758,8 +850,14 @@ class AssistantApp:
         if label:
             truncated = label if len(label) <= 60 else label[:57] + "..."
             self._chip_busy.config(text=f"\u21b3 {truncated}")
+            self._set_input_status(truncated, _STATUS_BUSY)
         else:
             self._chip_busy.config(text="Working...")
+            self._set_input_status("Working", _STATUS_BUSY)
+
+    def _set_input_status(self, text: str, color: str = _STATUS_INFO) -> None:
+        if hasattr(self, "_input_status"):
+            self._input_status.config(text=text, fg=color)
 
     # ===================================================================
     # CHAT TRANSCRIPT
@@ -793,13 +891,13 @@ class AssistantApp:
         dry = "  [DRY RUN active]" if info["dry_run"] else ""
         roots = ", ".join(os.path.basename(r) for r in info["allowed_roots"])
 
-        frame = tk.Frame(self._chat_container, bg=_BG_CHAT, padx=20, pady=18)
+        frame = tk.Frame(self._chat_container, bg=_BG_WELCOME, padx=20, pady=18)
         frame.pack(fill=tk.X, before=self._chat)
 
         tk.Label(
-            frame, text=f"Welcome to xAI Assistant{dry}",
+            frame, text=f"Welcome to xai-computer{dry}",
             font=("Segoe UI", 14, "bold"),
-            bg=_BG_CHAT, fg=_FG, anchor=tk.W,
+            bg=_BG_WELCOME, fg=_FG, anchor=tk.W,
         ).pack(fill=tk.X, pady=(0, 6))
 
         tk.Label(
@@ -809,31 +907,34 @@ class AssistantApp:
                 f"Roots: {roots}    "
                 f"Model: {info['model']}"
             ),
-            font=self._f_mono_sm, bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+            font=self._f_mono_sm, bg=_BG_WELCOME, fg=_FG_DIM, anchor=tk.W,
             justify=tk.LEFT, wraplength=800,
         ).pack(fill=tk.X, pady=(0, 12))
 
         tk.Label(
-            frame, text="Try one of these:",
-            font=self._f_ui_sm_bold, bg=_BG_CHAT, fg=_FG_LABEL, anchor=tk.W,
+            frame, text="Quick starts",
+            font=self._f_ui_sm_bold, bg=_BG_WELCOME, fg=_FG_LABEL, anchor=tk.W,
         ).pack(fill=tk.X, pady=(0, 6))
 
-        chips = tk.Frame(frame, bg=_BG_CHAT)
+        chips = tk.Frame(frame, bg=_BG_WELCOME)
         chips.pack(fill=tk.X)
-        for prompt in self._EXAMPLE_PROMPTS:
+        for idx, prompt in enumerate(self._EXAMPLE_PROMPTS):
             btn = tk.Button(
                 chips, text=prompt, font=self._f_ui_sm,
-                bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
+                bg=_BG_WELCOME_CHIP, fg=_FG, activebackground="#dbe8f5",
                 relief=tk.FLAT, padx=10, pady=5, cursor="hand2",
+                anchor=tk.W, justify=tk.LEFT, wraplength=240,
                 command=lambda p=prompt: self._use_prompt(p),
             )
-            btn.pack(side=tk.TOP, anchor=tk.W, pady=2)
+            btn.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=(0, 6), pady=2)
+            self._hover_button(btn, _BG_WELCOME_CHIP, "#dbe8f5")
+        chips.grid_columnconfigure(0, weight=1)
+        chips.grid_columnconfigure(1, weight=1)
 
         tk.Label(
             frame,
-            text="...or type your own message below. "
-                 "Use the sidebar to switch models, toggle dry-run, or undo.",
-            font=self._f_ui_sm, bg=_BG_CHAT, fg=_FG_DIM, anchor=tk.W,
+            text="Type below when you need something specific. Mutating work still uses approval and undo.",
+            font=self._f_ui_sm, bg=_BG_WELCOME, fg=_FG_DIM, anchor=tk.W,
             justify=tk.LEFT, wraplength=800,
         ).pack(fill=tk.X, pady=(12, 0))
 
@@ -866,7 +967,7 @@ class AssistantApp:
         current = self._input.get("1.0", tk.END).rstrip()
         sep = " " if current and not current.endswith((" ", "\n")) else ""
         self._input.insert(tk.END, f"{sep}{snippet}")
-        self._sync_input_height()
+        self._sync_input_state()
         self._focus_input()
         return "break"
 
@@ -989,16 +1090,19 @@ class AssistantApp:
 
         if is_high:
             risk_fg = _FG_RISK_HIGH
+            risk_bg = "#ffebee"
             risk_text = "HIGH"
         elif is_medium:
             risk_fg = _FG_RISK_MED
+            risk_bg = "#fff3e0"
             risk_text = "MEDIUM"
         else:
             risk_fg = _FG_RISK_LOW
+            risk_bg = "#e8f5e9"
             risk_text = "LOW"
         tk.Label(
             title_frame, text=f"Risk: {risk_text}",
-            font=self._f_ui_sm_bold, bg=_BG_APPROVAL, fg=risk_fg,
+            font=self._f_ui_sm_bold, bg=risk_bg, fg=risk_fg, padx=8, pady=2,
         ).pack(side=tk.RIGHT)
 
         # Extra warnings for shell commands
@@ -1082,7 +1186,7 @@ class AssistantApp:
             actions_frame.pack(fill=tk.X, pady=2)
 
         for action in card.actions:
-            row = tk.Frame(actions_frame, bg=_BG_APPROVAL)
+            row = tk.Frame(actions_frame, bg=_BG_APPROVAL_ROW, padx=6, pady=4)
             row.pack(fill=tk.X, pady=1)
 
             if action.risk == "high":
@@ -1097,12 +1201,12 @@ class AssistantApp:
 
             num_lbl = tk.Label(
                 row, text=f"{action.index}.", font=self._f_ui_sm_bold,
-                bg=_BG_APPROVAL, fg=_FG_DIM, width=3, anchor=tk.E,
+                bg=_BG_APPROVAL_ROW, fg=_FG_DIM, width=3, anchor=tk.E,
             )
             num_lbl.pack(side=tk.LEFT, padx=(0, 4))
             act_lbl = tk.Label(
                 row, text=f"{action.label}{marker}", font=self._f_mono,
-                bg=_BG_APPROVAL, fg=marker_fg, anchor=tk.W,
+                bg=_BG_APPROVAL_ROW, fg=marker_fg, anchor=tk.W,
                 wraplength=520, justify=tk.LEFT,
             )
             act_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -1129,21 +1233,25 @@ class AssistantApp:
             self._approval_scroll_widgets.clear()
             self._resolve_approval(answer, sink, generation)
 
-        tk.Button(
+        btn_approve = tk.Button(
             btn_frame, text="  Approve  ", font=self._f_approval_btn,
             bg=_BTN_APPROVE_BG, fg="white",
             activebackground="#388e3c", activeforeground="white",
             relief=tk.FLAT, cursor="hand2", padx=12, pady=4,
             command=lambda: _cleanup_and_resolve("yes"),
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        )
+        btn_approve.pack(side=tk.LEFT, padx=(0, 10))
+        self._hover_button(btn_approve, _BTN_APPROVE_BG, _BTN_APPROVE_HOVER_BG)
 
-        tk.Button(
+        btn_cancel = tk.Button(
             btn_frame, text="  Cancel  ", font=self._f_ui_sm_bold,
             bg=_BTN_CANCEL_BG, fg="white",
             activebackground="#c62828", activeforeground="white",
             relief=tk.FLAT, cursor="hand2", padx=12, pady=4,
             command=lambda: _cleanup_and_resolve("cancel"),
-        ).pack(side=tk.LEFT)
+        )
+        btn_cancel.pack(side=tk.LEFT)
+        self._hover_button(btn_cancel, _BTN_CANCEL_BG, _BTN_CANCEL_HOVER_BG)
 
         count_text = f"{n_actions} action(s)"
         if needs_scroll:
@@ -1155,11 +1263,17 @@ class AssistantApp:
 
         # Show panel
         self._approval_outer.pack(fill=tk.X, side=tk.BOTTOM, padx=6, pady=(0, 2))
+        self._set_input_status("Approval needed", _STATUS_BUSY)
 
         # Echo to transcript
         self._insert("Approval requested\n", "plan_hdr")
         for action in card.actions:
-            risk_mark = " [!]" if action.risk == "medium" else ""
+            if action.risk == "high":
+                risk_mark = " [!!]"
+            elif action.risk == "medium":
+                risk_mark = " [!]"
+            else:
+                risk_mark = ""
             self._insert(f"  {action.index}. {action.label}{risk_mark}\n", "plan_line")
 
     def _resolve_approval(self, answer: str, sink: GuiSink, generation: int = 0) -> None:
@@ -1210,9 +1324,11 @@ class AssistantApp:
         except tk.TclError:
             return
         if not t:
+            self._set_input_status("Nothing to copy", _STATUS_INFO)
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(t)
+        self._set_input_status("Transcript copied", _STATUS_INFO)
 
     def _find_clear_highlight(self) -> None:
         self._chat.config(state=tk.NORMAL)
@@ -1274,21 +1390,27 @@ class AssistantApp:
         win = tk.Toplevel(self.root)
         win.title("Find in transcript")
         win.transient(self.root)
+        win.configure(bg=_BG)
         win.resizable(False, False)
         self._find_win = win
         self._find_var = tk.StringVar()
 
-        row = tk.Frame(win, padx=10, pady=8)
+        row = tk.Frame(win, bg=_BG, padx=10, pady=8)
         row.pack(fill=tk.X)
-        tk.Label(row, text="Find:", font=self._f_ui_sm).pack(side=tk.LEFT)
-        ent = tk.Entry(row, textvariable=self._find_var, width=36, font=self._f_ui)
+        tk.Label(row, text="Find:", font=self._f_ui_sm, bg=_BG, fg=_FG).pack(side=tk.LEFT)
+        ent = tk.Entry(
+            row, textvariable=self._find_var, width=36, font=self._f_ui,
+            relief=tk.SOLID, borderwidth=1,
+        )
         ent.pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
 
-        self._find_status = tk.Label(win, text="", font=self._f_ui_sm, fg=_FG_RISK_MED)
+        self._find_status = tk.Label(
+            win, text="", font=self._f_ui_sm, bg=_BG, fg=_FG_RISK_MED,
+        )
         self._find_status.pack(anchor=tk.W, padx=10)
 
-        btn_row = tk.Frame(win, padx=10, pady=(0, 10))
-        btn_row.pack(fill=tk.X)
+        btn_row = tk.Frame(win, bg=_BG, padx=10)
+        btn_row.pack(fill=tk.X, pady=(0, 10))
 
         def do_next() -> None:
             self._find_next(backwards=False)
@@ -1316,9 +1438,18 @@ class AssistantApp:
 
         self._find_close_callback = on_close
 
-        tk.Button(btn_row, text="Next", command=do_next, width=10).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn_row, text="Previous", command=do_prev, width=10).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn_row, text="Close", command=on_close, width=10).pack(side=tk.LEFT)
+        for text, command in (
+            ("Next", do_next),
+            ("Previous", do_prev),
+            ("Close", on_close),
+        ):
+            btn = tk.Button(
+                btn_row, text=text, command=command, width=10,
+                bg=_BTN_SIDE_BG, fg=_FG, activebackground=_BG_SIDE_BUTTON_HOVER,
+                relief=tk.FLAT, cursor="hand2",
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._hover_button(btn, _BTN_SIDE_BG, _BG_SIDE_BUTTON_HOVER)
 
         win.protocol("WM_DELETE_WINDOW", on_close)
         win.bind("<Escape>", lambda e: on_close())
@@ -1355,6 +1486,24 @@ class AssistantApp:
         if cur != h:
             self._input.config(height=h)
 
+    def _sync_input_state(self) -> None:
+        self._sync_input_height()
+        try:
+            body = self._input.get("1.0", "end-1c")
+        except tk.TclError:
+            return
+        if hasattr(self, "_input_count"):
+            self._input_count.config(text=f"{len(body)} chars")
+        if not self._busy:
+            if body.strip():
+                if hasattr(self, "_btn_send"):
+                    self._btn_send.config(state=tk.NORMAL)
+                self._set_input_status("Ready to send", _STATUS_INFO)
+            else:
+                if hasattr(self, "_btn_send"):
+                    self._btn_send.config(state=tk.DISABLED)
+                self._set_input_status("Ready", _STATUS_READY)
+
     def _on_ctrl_enter(self, event: tk.Event) -> str:
         self.root.after(1, self._on_send)
         return "break"
@@ -1367,9 +1516,13 @@ class AssistantApp:
 
     def _on_send(self) -> None:
         text = self._input.get("1.0", tk.END).strip()
-        if not text or self._busy:
+        if not text:
+            self._set_input_status("Type a message first", _STATUS_INFO)
+            return
+        if self._busy:
             return
         self._input.delete("1.0", tk.END)
+        self._sync_input_state()
         self.append_user(text)
         self._set_busy(True)
 
@@ -1385,9 +1538,11 @@ class AssistantApp:
         finally:
             if not self._shutting_down:
                 try:
-                    self._save_session()
-                except Exception:
-                    pass
+                    save_result = self._save_session()
+                    if not save_result.get("ok"):
+                        self._sink.error(f"[error] Could not save session: {save_result.get('error')}")
+                except Exception as e:
+                    self._sink.error(f"[error] Could not save session: {e}")
                 try:
                     self._sink.stop_event.clear()
                     self.root.after(0, self._set_busy, False)
@@ -1465,67 +1620,33 @@ class AssistantApp:
     _SESSION_TITLE_MAX = 60
 
     def _sessions_dir(self) -> Path:
-        d = Path(get_state_dir()) / "sessions"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        return self._session_store.ensure_dir()
 
     def _session_path(self, session_id: str) -> Path:
-        return self._sessions_dir() / f"{session_id}.json"
+        return self._session_store.session_path(session_id)
 
     def _session_title(self) -> str:
-        for msg in self._messages:
-            if msg.get("role") == "user":
-                text = str(msg.get("content", "")).strip().splitlines()
-                first = text[0] if text else ""
-                if len(first) > self._SESSION_TITLE_MAX:
-                    return first[: self._SESSION_TITLE_MAX - 1] + "\u2026"
-                return first or "(untitled)"
-        return "(untitled)"
+        return self._session_store.session_title(self._messages, self._SESSION_TITLE_MAX)
 
-    def _save_session(self) -> None:
-        # Skip if only the system prompt is present.
-        if len([m for m in self._messages if m.get("role") != "system"]) == 0:
-            return
-        payload = {
-            "id": self._session_id,
-            "created": self._session_created,
-            "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "title": self._session_title(),
-            "messages": self._messages,
-            "token_totals": dict(self._token_totals),
-        }
-        path = self._session_path(self._session_id)
-        tmp = path.with_suffix(".json.tmp")
-        try:
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
-            os.replace(tmp, path)
-        except OSError:
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except OSError:
-                pass
+    def _save_session(self, *, report_errors: bool = False) -> dict[str, Any]:
+        result = self._session_store.save_session(
+            session_id=self._session_id,
+            created=self._session_created,
+            messages=self._messages,
+            token_totals=self._token_totals,
+            title_max=self._SESSION_TITLE_MAX,
+        )
+        if report_errors and not result.get("ok"):
+            self.append_error(f"[error] Could not save session: {result.get('error')}")
+        return result
 
     def _list_sessions(self) -> list[dict[str, Any]]:
-        d = self._sessions_dir()
-        entries: list[dict[str, Any]] = []
-        for p in d.glob("*.json"):
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            data["_path"] = p
-            data["_mtime"] = p.stat().st_mtime
-            entries.append(data)
-        entries.sort(key=lambda e: e.get("_mtime", 0), reverse=True)
-        return entries
+        return self._session_store.list_sessions()
 
     def _refresh_session_list(self) -> None:
         if self._sessions_list_frame is None:
             return
+        self._session_buttons.clear()
         for child in self._sessions_list_frame.winfo_children():
             child.destroy()
         sessions = self._list_sessions()[: self._SESSIONS_MAX_VISIBLE]
@@ -1540,17 +1661,23 @@ class AssistantApp:
             title = entry.get("title") or "(untitled)"
             is_current = sid == self._session_id
             label = title if not is_current else f"\u25cf {title}"
+            bg = _BG_SIDE_BUTTON_ACTIVE if is_current else _BTN_SIDE_BG
+            hover_bg = "#c5d8eb" if is_current else _BG_SIDE_BUTTON_HOVER
             btn = tk.Button(
                 self._sessions_list_frame,
                 text=label,
                 command=lambda p=entry["_path"]: self._load_session(p),
                 font=self._f_ui_sm,
-                bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
+                bg=bg, fg=_FG, activebackground=hover_bg,
                 relief=tk.FLAT, padx=6, pady=2, cursor="hand2",
                 anchor=tk.W, justify=tk.LEFT,
                 wraplength=_SIDE_W - 28,
             )
             btn.pack(fill=tk.X, pady=1)
+            self._hover_button(btn, bg, hover_bg)
+            if self._busy:
+                btn.config(state=tk.DISABLED)
+            self._session_buttons.append(btn)
 
     def _rebuild_transcript(self) -> None:
         self._chat.config(state=tk.NORMAL)
@@ -1572,13 +1699,13 @@ class AssistantApp:
         if self._busy:
             self.append_info("Cannot switch sessions while working.")
             return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            self.append_error(f"[error] Could not load session: {e}")
+        loaded = self._session_store.load_session(path)
+        if not loaded.get("ok"):
+            self.append_error(f"[error] Could not load session: {loaded.get('error')}")
             return
         # Save current session first so no work is lost.
-        self._save_session()
+        self._save_session(report_errors=True)
+        data = loaded["data"]
         self._session_id = data.get("id") or path.stem
         self._session_created = data.get("created") or (
             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1591,13 +1718,14 @@ class AssistantApp:
         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
             self._token_totals[k] = int(saved_totals.get(k) or 0)
         self._update_token_chip()
+        self._update_header()
         self._hide_welcome()
         self._rebuild_transcript()
         self._refresh_session_list()
 
     def _on_clear(self) -> None:
         # Save the outgoing session before starting a fresh one.
-        self._save_session()
+        self._save_session(report_errors=True)
         self._chat.config(state=tk.NORMAL)
         self._chat.delete("1.0", tk.END)
         self._chat.config(state=tk.DISABLED)
@@ -1608,6 +1736,7 @@ class AssistantApp:
         for k in self._token_totals:
             self._token_totals[k] = 0
         self._update_token_chip()
+        self._update_header()
         self._show_welcome()
         self._refresh_session_list()
 
@@ -1700,20 +1829,26 @@ class AssistantApp:
             ("Remove", on_remove),
             ("Reset", on_reset),
         ):
-            tk.Button(
+            btn = tk.Button(
                 btns, text=text, command=cmd, font=self._f_ui_sm,
                 bg=_BTN_SIDE_BG, fg=_FG, activebackground="#cfcfcf",
                 relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
-            ).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 6))
+            self._hover_button(btn, _BTN_SIDE_BG, _BG_SIDE_BUTTON_HOVER)
+        btn_save = tk.Button(
             btns, text="Save", command=on_save, font=self._f_approval_btn,
             bg=_BTN_PRIMARY_BG, fg="white", activebackground="#1976d2",
             activeforeground="white", relief=tk.FLAT, padx=14, pady=4, cursor="hand2",
-        ).pack(side=tk.RIGHT)
-        tk.Button(
+        )
+        btn_save.pack(side=tk.RIGHT)
+        self._hover_button(btn_save, _BTN_PRIMARY_BG, _BTN_PRIMARY_HOVER_BG)
+        btn_cancel = tk.Button(
             btns, text="Cancel", command=dlg.destroy, font=self._f_ui_sm,
             bg=_BTN_SIDE_BG, fg=_FG, relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
-        ).pack(side=tk.RIGHT, padx=(0, 6))
+        )
+        btn_cancel.pack(side=tk.RIGHT, padx=(0, 6))
+        self._hover_button(btn_cancel, _BTN_SIDE_BG, _BG_SIDE_BUTTON_HOVER)
 
     def _on_open_logs(self) -> None:
         log_dir = get_log_dir()

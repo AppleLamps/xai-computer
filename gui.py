@@ -332,8 +332,8 @@ class AssistantApp:
 
     def _build_ui(self) -> None:
         self._build_header()
-        self._build_body()
         self._build_input_bar()
+        self._build_body()
         self._bind_shortcuts()
 
     # ── Header ──
@@ -661,10 +661,13 @@ class AssistantApp:
     # ── Input bar ──
 
     def _build_input_bar(self) -> None:
-        tk.Frame(self.root, bg=_SEP_COLOR, height=1).pack(fill=tk.X, side=tk.BOTTOM)
+        composer = tk.Frame(self.root, bg=_BG)
+        composer.pack(fill=tk.X, side=tk.BOTTOM)
 
-        status_row = tk.Frame(self.root, bg=_BG, padx=10)
-        status_row.pack(fill=tk.X, side=tk.BOTTOM, pady=(6, 0))
+        tk.Frame(composer, bg=_SEP_COLOR, height=1).pack(fill=tk.X)
+
+        status_row = tk.Frame(composer, bg=_BG, padx=10)
+        status_row.pack(fill=tk.X, pady=(6, 0))
         self._input_status = tk.Label(
             status_row, text="Ready", font=self._f_ui_sm,
             bg=_BG, fg=_STATUS_READY, anchor=tk.W,
@@ -676,8 +679,8 @@ class AssistantApp:
         )
         self._input_count.pack(side=tk.RIGHT)
 
-        bar = tk.Frame(self.root, bg=_BG, padx=10)
-        bar.pack(fill=tk.X, side=tk.BOTTOM, pady=(4, 8))
+        bar = tk.Frame(composer, bg=_BG, padx=10)
+        bar.pack(fill=tk.X, pady=(4, 8))
 
         self._input = tk.Text(
             bar, height=_INPUT_MIN_LINES, font=self._f_ui, bg=_BG_INPUT, fg=_FG,

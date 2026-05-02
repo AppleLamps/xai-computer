@@ -8,6 +8,7 @@ GUI) can plug in its own rendering.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -516,6 +517,40 @@ def _tool_result_message(tool_call_id: str, payload: dict[str, Any]) -> dict[str
     }
 
 
+def _requested_clipboard_write(user_text: str) -> bool:
+    lower = user_text.casefold()
+    return "clipboard" in lower and bool(re.search(r"\b(copy|put|place|save|send)\b", lower))
+
+
+def _claims_clipboard_write(text: str) -> bool:
+    lower = text.casefold()
+    if "clipboard" not in lower:
+        return False
+    return bool(
+        re.search(r"\b(copied|copying|copy|placed|saved|sent)\b", lower)
+        or "to your clipboard" in lower
+        or "on your clipboard" in lower
+    )
+
+
+def _successful_tool_since(messages: list[dict[str, Any]], start: int, tool_name: str) -> bool:
+    call_ids: set[str] = set()
+    for msg in messages[start:]:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if fn.get("name") == tool_name and tc.get("id"):
+                    call_ids.add(str(tc["id"]))
+        elif msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids:
+            try:
+                payload = json.loads(str(msg.get("content") or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("ok") is True:
+                return True
+    return False
+
+
 def _ensure_tool_call_ids(tool_calls: list[ToolCallSpec]) -> list[ToolCallSpec]:
     out: list[ToolCallSpec] = []
     for tc in tool_calls:
@@ -824,6 +859,7 @@ def _run_turn(
     log_event("user_message", {"length": len(user_text)}, user_request=user_text)
 
     max_steps = get_max_tool_loops()
+    clipboard_retry_requested = False
     for _ in range(max_steps):
         # Signal to the sink that a new LLM response is starting.
         getattr(sink, "start_stream", lambda: None)()
@@ -862,6 +898,36 @@ def _run_turn(
 
         text = (result.content or "").strip()
         if text:
+            missing_clipboard_write = (
+                _requested_clipboard_write(user_text)
+                and _claims_clipboard_write(text)
+                and not _successful_tool_since(messages, turn_start, "copy_to_clipboard")
+            )
+            if missing_clipboard_write and not clipboard_retry_requested:
+                clipboard_retry_requested = True
+                getattr(sink, "cancel_stream", lambda: None)()
+                sink.info(
+                    "[note] Clipboard copy was requested, but no clipboard tool ran. "
+                    "Asking the assistant to perform the clipboard step now."
+                )
+                messages.append({"role": "assistant", "content": text})
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Correction: the user requested a clipboard copy, but no successful "
+                        "copy_to_clipboard tool call has run in this turn. You must now call "
+                        "copy_to_clipboard with the exact clean summary text, or clearly state "
+                        "that you cannot complete the clipboard step. Do not claim the clipboard "
+                        "was changed unless the tool result says ok=true."
+                    ),
+                })
+                log_event("clipboard_missing_tool_retry", {"assistant_text_length": len(text)}, phase="retry")
+                continue
+            if missing_clipboard_write:
+                getattr(sink, "cancel_stream", lambda: None)()
+                sink.error("[warning] Clipboard copy was requested, but no successful clipboard tool call ran.")
+                log_event("clipboard_missing_tool_warning", {"assistant_text_length": len(text)}, phase="error")
+                return
             sink.assistant(text)
         else:
             sink.assistant("(empty response)")

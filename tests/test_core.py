@@ -9,9 +9,12 @@ from core import (
     PlannedAction,
     _action_label,
     _action_risk,
+    _claims_clipboard_write,
     _format_execution_summary,
     _process_tool_calls,
     _run_turn,
+    _requested_clipboard_write,
+    _successful_tool_since,
     _tool_progress_label,
     build_approval_card,
 )
@@ -150,6 +153,33 @@ class TestExecutionSummary:
         assert _format_execution_summary(block, {"m1": {"ok": True}}) == (
             "Completed 1/1 operation(s)."
         )
+
+
+class TestClipboardClaimGuard:
+    def test_detects_clipboard_requests_and_claims(self) -> None:
+        assert _requested_clipboard_write("Copy the summary to my clipboard.")
+        assert not _requested_clipboard_write("Read my clipboard.")
+        assert _claims_clipboard_write("Copying this to your clipboard now.")
+        assert _claims_clipboard_write("Copied to your clipboard.")
+        assert not _claims_clipboard_write("I cannot access the clipboard.")
+
+    def test_successful_tool_since_detects_copy_result(self) -> None:
+        messages = [
+            {"role": "user", "content": "copy it"},
+            {
+                "role": "assistant",
+                "content": "doing it",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "copy_to_clipboard", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+        ]
+        assert _successful_tool_since(messages, 0, "copy_to_clipboard")
 
 
 class TestProcessToolCallsConversation:
@@ -399,6 +429,74 @@ class TestRunTurnRollback:
 
         assert messages == [{"role": "assistant", "content": "previous"}]
         sink.error.assert_called_once()
+
+
+class TestRunTurnClipboardGuard:
+    def _make_sink(self) -> MagicMock:
+        sink = MagicMock()
+        sink.info = MagicMock()
+        sink.error = MagicMock()
+        sink.assistant = MagicMock()
+        sink.plan = MagicMock()
+        sink.progress = MagicMock()
+        sink.prompt_confirmation = MagicMock(return_value="yes")
+        sink.cancel_stream = MagicMock()
+        return sink
+
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=5)
+    @patch("core._chat_with_optional_web_tools")
+    @patch("core.dispatch_tool")
+    def test_clipboard_claim_without_tool_is_retried(
+        self,
+        mock_dispatch: MagicMock,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+    ) -> None:
+        mock_dispatch.return_value = {"ok": True}
+        mock_chat.side_effect = [
+            ChatCompletionResult(
+                message_role="assistant",
+                content="I'll search first.",
+                tool_calls=[ToolCallSpec(id="s1", name="search_file_contents", arguments={"path": "/tmp", "query": "x"})],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Copying the clean summary to your clipboard now.",
+                tool_calls=[],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Now I will use the clipboard tool.",
+                tool_calls=[ToolCallSpec(id="c1", name="copy_to_clipboard", arguments={"text": "clean summary"})],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Done.",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+        sink = self._make_sink()
+        messages: list = []
+
+        _run_turn(messages, "Search and copy the summary to my clipboard.", sink)
+
+        assert mock_chat.call_count == 4
+        assert mock_dispatch.call_args_list[-1].args[0] == "copy_to_clipboard"
+        sink.info.assert_any_call(
+            "[note] Clipboard copy was requested, but no clipboard tool ran. "
+            "Asking the assistant to perform the clipboard step now."
+        )
+        sink.assistant.assert_called_with("Done.")
 
 
 # ---------------------------------------------------------------------------

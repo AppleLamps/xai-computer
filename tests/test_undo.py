@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from undo import (
     _save_all,
     get_history,
     record_create_folder,
+    record_copy_file,
     record_move,
     record_rename,
     undo_last,
@@ -78,6 +81,14 @@ class TestRecording:
         records = _load_all()
         assert len(records) == 1
         assert records[0]["action"] == "create_folder"
+
+    def test_record_copy_file(self) -> None:
+        record_copy_file("/a/source.txt", "/a/copy.txt")
+        records = _load_all()
+        assert len(records) == 1
+        assert records[0]["action"] == "copy_file"
+        assert records[0]["source"] == "/a/source.txt"
+        assert records[0]["destination"] == "/a/copy.txt"
 
     def test_multiple_records_append(self) -> None:
         record_move("/a/1.txt", "/b/1.txt")
@@ -188,6 +199,43 @@ class TestUndoLast:
         # Third undo: nothing left
         r3 = undo_last()
         assert r3["ok"] is False
+
+    def test_undo_copy_file_recycles_copy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        copied = tmp_path / "copy.txt"
+        copied.write_text("copy", encoding="utf-8")
+        calls: list[str] = []
+
+        def fake_send2trash(path: str) -> None:
+            calls.append(path)
+            Path(path).unlink()
+
+        monkeypatch.setitem(sys.modules, "send2trash", types.SimpleNamespace(send2trash=fake_send2trash))
+        record_copy_file(str(tmp_path / "source.txt"), str(copied))
+
+        result = undo_last()
+        assert result["ok"] is True
+        assert calls == [str(copied)]
+        assert not copied.exists()
+
+    def test_undo_overwritten_copy_restores_backup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        copied = tmp_path / "copy.txt"
+        copied.write_text("new", encoding="utf-8")
+        backup = tmp_path / "copy.txt.bak"
+        backup.write_text("old", encoding="utf-8")
+        recycled: list[str] = []
+
+        def fake_send2trash(path: str) -> None:
+            recycled.append(path)
+            Path(path).unlink()
+
+        monkeypatch.setitem(sys.modules, "send2trash", types.SimpleNamespace(send2trash=fake_send2trash))
+        record_copy_file(str(tmp_path / "source.txt"), str(copied), str(backup))
+
+        result = undo_last()
+        assert result["ok"] is True
+        assert copied.read_text(encoding="utf-8") == "old"
+        assert not backup.exists()
+        assert recycled == [str(copied)]
 
 
 # ---------------------------------------------------------------------------

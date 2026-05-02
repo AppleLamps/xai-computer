@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -13,12 +15,19 @@ from tools import (
     _format_size,
     _unique_destination,
     analyze_directory,
+    copy_file,
+    copy_to_clipboard,
+    delete_file_to_recycle_bin,
     directory_tree,
     file_type_summary,
+    get_file_info,
     largest_files,
     list_directory,
     read_text_file,
+    read_clipboard,
     recent_files,
+    recursive_find_files,
+    search_file_contents,
     search_files,
 )
 
@@ -193,6 +202,67 @@ class TestSearchFiles:
         assert result["ok"] is False
 
 
+class TestGetFileInfo:
+    def test_file_info_with_hash(self, sample_files: Path) -> None:
+        target = sample_files / "notes.txt"
+        result = get_file_info(str(target), include_hash=True)
+        assert result["ok"] is True
+        assert result["is_file"] is True
+        assert result["extension"] == ".txt"
+        assert result["category"] == "Documents"
+        assert result["size_bytes"] == target.stat().st_size
+        assert len(result["sha256"]) == 64
+
+    def test_directory_info(self, sample_files: Path) -> None:
+        result = get_file_info(str(sample_files / "subfolder"))
+        assert result["ok"] is True
+        assert result["is_dir"] is True
+        assert result["category"] == "Folder"
+        assert result["size_bytes"] is None
+
+
+class TestRecursiveFindFiles:
+    def test_finds_nested_file_by_query(self, sample_files: Path) -> None:
+        result = recursive_find_files(str(sample_files), query="deep")
+        assert result["ok"] is True
+        assert any(m["name"] == "deep.txt" for m in result["matches"])
+
+    def test_kind_and_pattern_filters(self, sample_files: Path) -> None:
+        result = recursive_find_files(str(sample_files), pattern="*.txt", kind="file")
+        assert result["ok"] is True
+        assert result["count"] >= 1
+        assert all(m["is_file"] and m["name"].endswith(".txt") for m in result["matches"])
+
+    def test_limit_caps_results(self, sample_files: Path) -> None:
+        result = recursive_find_files(str(sample_files), limit=1)
+        assert result["ok"] is True
+        assert result["count"] == 1
+        assert result["truncated"] is True
+
+
+class TestSearchFileContents:
+    def test_searches_directory_text_files(self, sample_files: Path) -> None:
+        result = search_file_contents(str(sample_files), "second", glob="*.txt")
+        assert result["ok"] is True
+        assert any(m["name"] == "notes.txt" and m["line"] == 2 for m in result["matches"])
+
+    def test_searches_single_file(self, sample_files: Path) -> None:
+        result = search_file_contents(str(sample_files / "notes.txt"), "third")
+        assert result["ok"] is True
+        assert result["count"] == 1
+        assert result["matches"][0]["line"] == 3
+
+    def test_empty_query_rejected(self, sample_files: Path) -> None:
+        result = search_file_contents(str(sample_files), "")
+        assert result["ok"] is False
+
+    def test_skips_binary_or_large_files(self, sample_files: Path) -> None:
+        result = search_file_contents(str(sample_files), "anything", glob="*.zip")
+        assert result["ok"] is True
+        assert result["count"] == 0
+        assert result["skipped_files"] >= 1
+
+
 class TestRecentFiles:
     def test_returns_files(self, sample_files: Path) -> None:
         result = recent_files(str(sample_files))
@@ -253,3 +323,108 @@ class TestDryRun:
             assert not new_dir.exists()
         finally:
             set_dry_run(False)
+
+    def test_copy_file_dry_run(self, sample_files: Path) -> None:
+        set_dry_run(True)
+        try:
+            src = sample_files / "notes.txt"
+            dst = sample_files / "copy.txt"
+            result = copy_file(str(src), str(dst))
+            assert result["ok"] is True
+            assert result.get("dry_run") is True
+            assert not dst.exists()
+        finally:
+            set_dry_run(False)
+
+
+class TestCopyFile:
+    def test_copies_file(self, sample_files: Path) -> None:
+        src = sample_files / "notes.txt"
+        dst = sample_files / "notes-copy.txt"
+        result = copy_file(str(src), str(dst))
+        assert result["ok"] is True
+        assert Path(result["destination"]).read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+    def test_collision_uses_safe_duplicate_name(self, sample_files: Path) -> None:
+        src = sample_files / "notes.txt"
+        dst = sample_files / "existing.txt"
+        dst.write_text("old", encoding="utf-8")
+        result = copy_file(str(src), str(dst), overwrite=False)
+        assert result["ok"] is True
+        assert result["destination"].endswith("existing_dup1.txt")
+        assert dst.read_text(encoding="utf-8") == "old"
+
+    def test_overwrite_creates_backup(self, sample_files: Path) -> None:
+        src = sample_files / "notes.txt"
+        dst = sample_files / "existing.txt"
+        dst.write_text("old", encoding="utf-8")
+        result = copy_file(str(src), str(dst), overwrite=True)
+        assert result["ok"] is True
+        assert Path(result["backup_path"]).exists()
+        assert dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+    def test_overwrite_same_file_rejected_without_backup(self, sample_files: Path) -> None:
+        src = sample_files / "notes.txt"
+        result = copy_file(str(src), str(src), overwrite=True)
+        assert result["ok"] is False
+        assert not list(sample_files.glob("notes.txt.bak*"))
+
+    def test_rejects_directory_source(self, sample_files: Path) -> None:
+        result = copy_file(str(sample_files / "subfolder"), str(sample_files / "copy"))
+        assert result["ok"] is False
+
+
+class TestDeleteFileToRecycleBin:
+    def test_uses_send2trash(self, sample_files: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = sample_files / "notes.txt"
+        calls: list[str] = []
+
+        def fake_send2trash(path: str) -> None:
+            calls.append(path)
+
+        monkeypatch.setitem(sys.modules, "send2trash", types.SimpleNamespace(send2trash=fake_send2trash))
+        result = delete_file_to_recycle_bin(str(target))
+        assert result["ok"] is True
+        assert calls == [str(target.resolve())]
+
+    def test_rejects_directories(self, sample_files: Path) -> None:
+        result = delete_file_to_recycle_bin(str(sample_files / "subfolder"))
+        assert result["ok"] is False
+
+
+class FakeClipboardRoot:
+    content = ""
+
+    def __init__(self, initial: str = "") -> None:
+        self.initial = initial
+
+    def clipboard_clear(self) -> None:
+        FakeClipboardRoot.content = ""
+
+    def clipboard_append(self, text: str) -> None:
+        FakeClipboardRoot.content = text
+
+    def clipboard_get(self) -> str:
+        return self.initial or FakeClipboardRoot.content
+
+    def update(self) -> None:
+        pass
+
+    def destroy(self) -> None:
+        pass
+
+
+class TestClipboardTools:
+    def test_copy_to_clipboard_redacts_preview(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("tools._clipboard_root", lambda: FakeClipboardRoot())
+        result = copy_to_clipboard("password=supersecret")
+        assert result["ok"] is True
+        assert "supersecret" not in result["text_preview"]
+        assert FakeClipboardRoot.content == "password=supersecret"
+
+    def test_read_clipboard_truncates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("tools._clipboard_root", lambda: FakeClipboardRoot("abcdef"))
+        result = read_clipboard(max_chars=3)
+        assert result["ok"] is True
+        assert result["content"] == "abc"
+        assert result["truncated"] is True

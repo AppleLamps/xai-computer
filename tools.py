@@ -8,6 +8,9 @@ Shell execution goes through shell_guard.py for deterministic classification.
 from __future__ import annotations
 
 import json
+import fnmatch
+import hashlib
+import os
 import re
 import shlex
 import shutil
@@ -40,6 +43,7 @@ from shell_guard import (
     validate_working_dir,
 )
 from undo import record_create_folder, record_move, record_organize_move, record_rename, record_write_file
+from undo import record_copy_file
 
 ToolHandler = Callable[..., dict[str, Any]]
 
@@ -83,6 +87,12 @@ _DUPLICATE_PATTERNS: list[re.Pattern[str]] = [
 
 # Max bytes for read_text_file
 _MAX_READ_BYTES = 100_000  # ~100 KB
+_MAX_HASH_BYTES = 100_000_000  # 100 MB
+_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".json",
+    ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log", ".csv", ".tsv",
+    ".sql", ".ps1", ".bat", ".cmd", ".sh", ".rst",
+}
 
 
 def _category_for_suffix(suffix: str) -> str:
@@ -136,9 +146,88 @@ def _detect_duplicates(names: list[str]) -> list[dict[str, str]]:
     return dupes
 
 
+def _iso_from_timestamp(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _best_effort_hidden(path: Path) -> bool:
+    if is_hidden_name(path.name):
+        return True
+    try:
+        attrs = os.stat(path).st_file_attributes  # type: ignore[attr-defined]
+        return bool(attrs & 0x2)
+    except (AttributeError, OSError):
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_probably_text(path: Path, max_file_bytes: int) -> bool:
+    try:
+        if path.stat().st_size > max_file_bytes:
+            return False
+        if path.suffix.casefold() in _TEXT_EXTENSIONS:
+            return True
+        with path.open("rb") as f:
+            sample = f.read(2048)
+        return b"\x00" not in sample
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Read-only tools
 # ---------------------------------------------------------------------------
+
+
+def get_file_info(path: str, include_hash: bool = False) -> dict[str, Any]:
+    try:
+        fp = require_allowed_path_readonly(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    if not fp.exists():
+        return {"ok": False, "error": f"Path does not exist: {fp}"}
+    try:
+        stat = fp.stat()
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    is_file = fp.is_file()
+    is_dir = fp.is_dir()
+    info: dict[str, Any] = {
+        "ok": True,
+        "path": str(fp),
+        "name": fp.name,
+        "parent": str(fp.parent),
+        "exists": True,
+        "is_file": is_file,
+        "is_dir": is_dir,
+        "extension": fp.suffix.lower() if is_file else "",
+        "category": _category_for_suffix(fp.suffix) if is_file else "Folder" if is_dir else "Other",
+        "size_bytes": stat.st_size if is_file else None,
+        "size": _format_size(stat.st_size) if is_file else None,
+        "created": _iso_from_timestamp(stat.st_ctime),
+        "modified": _iso_from_timestamp(stat.st_mtime),
+        "accessed": _iso_from_timestamp(stat.st_atime),
+        "readonly": not os.access(fp, os.W_OK),
+        "hidden": _best_effort_hidden(fp),
+    }
+    if include_hash:
+        if not is_file:
+            info["sha256_error"] = "Hashing is only available for files."
+        elif stat.st_size > _MAX_HASH_BYTES:
+            info["sha256_error"] = f"File too large to hash: {_format_size(stat.st_size)}"
+        else:
+            try:
+                info["sha256"] = _sha256_file(fp)
+            except OSError as e:
+                info["sha256_error"] = str(e)
+    return info
 
 
 def list_directory(path: str) -> dict[str, Any]:
@@ -188,6 +277,166 @@ def list_directory(path: str) -> dict[str, Any]:
         }
     except OSError as e:
         return {"ok": False, "error": str(e)}
+
+
+def recursive_find_files(
+    path: str,
+    query: str = "",
+    pattern: str = "",
+    kind: str = "any",
+    max_depth: int = 8,
+    limit: int = 100,
+) -> dict[str, Any]:
+    try:
+        root = require_allowed_path_readonly(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    if not root.is_dir():
+        return {"ok": False, "error": f"Not a directory: {root}"}
+    kind = kind if kind in {"any", "file", "folder"} else "any"
+    max_depth = max(0, min(int(max_depth), 20))
+    limit = max(1, min(int(limit), 500))
+    q = query.casefold().strip()
+    pat = pattern.strip()
+    matches: list[dict[str, Any]] = []
+    visited = 0
+
+    def walk(folder: Path, depth: int) -> None:
+        nonlocal visited
+        if len(matches) >= limit or depth > max_depth:
+            return
+        try:
+            children = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold()))
+        except OSError:
+            return
+        for child in children:
+            if len(matches) >= limit:
+                return
+            if is_hidden_name(child.name) or is_system_or_protected_name(child.name):
+                continue
+            visited += 1
+            is_dir = child.is_dir()
+            is_file = child.is_file()
+            kind_ok = kind == "any" or (kind == "file" and is_file) or (kind == "folder" and is_dir)
+            query_ok = not q or q in child.name.casefold()
+            pattern_ok = not pat or fnmatch.fnmatch(child.name.casefold(), pat.casefold())
+            if kind_ok and query_ok and pattern_ok:
+                matches.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "is_file": is_file,
+                    "is_dir": is_dir,
+                    "depth": depth,
+                })
+            if is_dir:
+                walk(child, depth + 1)
+
+    walk(root, 0)
+    return {
+        "ok": True,
+        "path": str(root),
+        "query": query,
+        "pattern": pattern,
+        "kind": kind,
+        "max_depth": max_depth,
+        "limit": limit,
+        "matches": matches,
+        "count": len(matches),
+        "visited": visited,
+        "truncated": len(matches) >= limit,
+    }
+
+
+def search_file_contents(
+    path: str,
+    query: str,
+    glob: str = "",
+    max_depth: int = 8,
+    limit: int = 100,
+    max_file_bytes: int = 1_000_000,
+) -> dict[str, Any]:
+    try:
+        root = require_allowed_path_readonly(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    if not root.is_dir() and not root.is_file():
+        return {"ok": False, "error": f"Not a file or directory: {root}"}
+    q = query.strip()
+    if not q:
+        return {"ok": False, "error": "Empty content search query."}
+    max_depth = max(0, min(int(max_depth), 20))
+    limit = max(1, min(int(limit), 500))
+    max_file_bytes = max(1_000, min(int(max_file_bytes), 10_000_000))
+    pat = glob.strip()
+    matches: list[dict[str, Any]] = []
+    scanned_files = 0
+    skipped_files = 0
+
+    def scan_file(child: Path) -> None:
+        nonlocal scanned_files, skipped_files
+        if len(matches) >= limit:
+            return
+        if pat and not fnmatch.fnmatch(child.name.casefold(), pat.casefold()):
+            return
+        if not _is_probably_text(child, max_file_bytes):
+            skipped_files += 1
+            return
+        scanned_files += 1
+        try:
+            with child.open("r", encoding="utf-8", errors="replace") as f:
+                for line_no, line in enumerate(f, 1):
+                    if q.casefold() in line.casefold():
+                        snippet = line.strip()
+                        if len(snippet) > 240:
+                            snippet = snippet[:237] + "..."
+                        matches.append({
+                            "path": str(child),
+                            "name": child.name,
+                            "line": line_no,
+                            "snippet": snippet,
+                        })
+                        if len(matches) >= limit:
+                            return
+        except OSError:
+            skipped_files += 1
+
+    def walk(folder: Path, depth: int) -> None:
+        nonlocal scanned_files, skipped_files
+        if len(matches) >= limit or depth > max_depth:
+            return
+        try:
+            children = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold()))
+        except OSError:
+            return
+        for child in children:
+            if len(matches) >= limit:
+                return
+            if is_hidden_name(child.name) or is_system_or_protected_name(child.name):
+                continue
+            if child.is_dir():
+                walk(child, depth + 1)
+                continue
+            if not child.is_file():
+                continue
+            scan_file(child)
+
+    if root.is_file():
+        scan_file(root)
+    else:
+        walk(root, 0)
+    return {
+        "ok": True,
+        "path": str(root),
+        "query": query,
+        "glob": glob,
+        "max_depth": max_depth,
+        "limit": limit,
+        "matches": matches,
+        "count": len(matches),
+        "scanned_files": scanned_files,
+        "skipped_files": skipped_files,
+        "truncated": len(matches) >= limit,
+    }
 
 
 def analyze_directory(path: str) -> dict[str, Any]:
@@ -612,6 +861,73 @@ def move_file(source: str, destination: str) -> dict[str, Any]:
     return {"ok": True, "source": str(src), "destination": str(final_dest)}
 
 
+def copy_file(source: str, destination: str, overwrite: bool = False) -> dict[str, Any]:
+    try:
+        src, dest_path = _prepare_move_paths(source, destination)
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    if not src.is_file():
+        return {"ok": False, "error": f"Source is not a file: {src}"}
+    final_dest = dest_path if overwrite else _unique_destination(dest_path)
+    if overwrite and src == final_dest:
+        return {"ok": False, "error": "Source and destination are the same file."}
+    backup_path: str | None = None
+
+    if is_dry_run():
+        log_event("copy_file", {"source": str(src), "destination": str(final_dest)}, phase="dry_run")
+        return {
+            "ok": True,
+            "dry_run": True,
+            "source": str(src),
+            "destination": str(final_dest),
+            "overwrite": overwrite,
+        }
+
+    try:
+        final_dest.parent.mkdir(parents=True, exist_ok=True)
+        if final_dest.exists() and overwrite:
+            if not final_dest.is_file():
+                return {"ok": False, "error": f"Destination exists and is not a file: {final_dest}"}
+            bak = unique_backup_path(final_dest)
+            shutil.copy2(final_dest, bak)
+            backup_path = str(bak)
+        elif final_dest.exists():
+            final_dest = _unique_destination(final_dest)
+        shutil.copy2(src, final_dest)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    record_copy_file(str(src), str(final_dest), backup_path)
+    log_event("copy_file", {
+        "source": str(src),
+        "destination": str(final_dest),
+        "overwrite": overwrite,
+        "backup_path": backup_path,
+    }, phase="executed")
+    result = {"ok": True, "source": str(src), "destination": str(final_dest), "overwrite": overwrite}
+    if backup_path:
+        result["backup_path"] = backup_path
+    return result
+
+
+def delete_file_to_recycle_bin(path: str) -> dict[str, Any]:
+    try:
+        fp = require_allowed_path(Path(path))
+    except (OSError, ValueError, PermissionError) as e:
+        return {"ok": False, "error": str(e)}
+    if not fp.is_file():
+        return {"ok": False, "error": f"Path is not a file: {fp}"}
+    if is_dry_run():
+        log_event("delete_file_to_recycle_bin", {"path": str(fp)}, phase="dry_run")
+        return {"ok": True, "dry_run": True, "path": str(fp)}
+    try:
+        from send2trash import send2trash
+        send2trash(str(fp))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Cannot send to Recycle Bin: {e}"}
+    log_event("delete_file_to_recycle_bin", {"path": str(fp)}, phase="executed")
+    return {"ok": True, "path": str(fp), "note": "sent to Recycle Bin"}
+
+
 def rename_file(source: str, new_name: str) -> dict[str, Any]:
     try:
         src = require_allowed_path(Path(source))
@@ -913,6 +1229,68 @@ def run_command(command: str, working_dir: str | None = None) -> dict[str, Any]:
     }
 
 
+def _clipboard_root() -> Any:
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        return root
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Clipboard unavailable: {e}") from e
+
+
+def copy_to_clipboard(text: str) -> dict[str, Any]:
+    preview = redact_secrets(text)
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    if is_dry_run():
+        log_event("copy_to_clipboard", {"chars": len(text), "text_preview": preview}, phase="dry_run")
+        return {"ok": True, "dry_run": True, "chars": len(text), "text_preview": preview}
+    root = None
+    try:
+        root = _clipboard_root()
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+    log_event("copy_to_clipboard", {"chars": len(text), "text_preview": preview}, phase="executed")
+    return {"ok": True, "chars": len(text), "text_preview": preview}
+
+
+def read_clipboard(max_chars: int = 5000) -> dict[str, Any]:
+    max_chars = max(1, min(int(max_chars), 100_000))
+    root = None
+    try:
+        root = _clipboard_root()
+        text = root.clipboard_get()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+    text = str(text)
+    truncated = len(text) > max_chars
+    content = text[:max_chars]
+    log_event("read_clipboard", {"chars": len(text), "truncated": truncated}, phase="executed")
+    return {
+        "ok": True,
+        "content": content,
+        "chars": len(text),
+        "returned_chars": len(content),
+        "truncated": truncated,
+    }
+
+
 # ---------------------------------------------------------------------------
 # File writing
 # ---------------------------------------------------------------------------
@@ -995,6 +1373,14 @@ def write_file(path: str, content: str, overwrite: bool = False) -> dict[str, An
 
 def take_screenshot(region: dict[str, int] | None = None) -> dict[str, Any]:
     return desktop_tools.take_screenshot(region)
+
+
+def get_screen_info() -> dict[str, Any]:
+    return desktop_tools.get_screen_info()
+
+
+def window_screenshot(window_id: int) -> dict[str, Any]:
+    return desktop_tools.window_screenshot(window_id)
 
 
 def ocr_image(path: str, region: dict[str, int] | None = None) -> dict[str, Any]:
@@ -1102,6 +1488,10 @@ def browser_extract_text(selector: str | None = None, timeout_sec: float = 10.0)
     return browser_tools.browser_extract_text(selector, timeout_sec)
 
 
+def browser_screenshot(selector: str | None = None, full_page: bool = False) -> dict[str, Any]:
+    return browser_tools.browser_screenshot(selector, full_page)
+
+
 def browser_wait_for(selector: str, timeout_sec: float = 10.0) -> dict[str, Any]:
     return browser_tools.browser_wait_for(selector, timeout_sec)
 
@@ -1130,17 +1520,28 @@ def apply_patch(path: str, unified_diff: str) -> dict[str, Any]:
 def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     handlers: dict[str, ToolHandler] = {
         # Read-only
+        "get_file_info": lambda **a: get_file_info(a["path"], a.get("include_hash", False)),
         "list_directory": lambda **a: list_directory(a["path"]),
         "analyze_directory": lambda **a: analyze_directory(a["path"]),
         "largest_files": lambda **a: largest_files(a["path"], a.get("limit", 10)),
         "file_type_summary": lambda **a: file_type_summary(a["path"]),
         "read_text_file": lambda **a: read_text_file(a["path"], a.get("max_chars", 5000)),
         "search_files": lambda **a: search_files(a["path"], a["query"]),
+        "recursive_find_files": lambda **a: recursive_find_files(
+            a["path"], a.get("query", ""), a.get("pattern", ""), a.get("kind", "any"),
+            a.get("max_depth", 8), a.get("limit", 100),
+        ),
+        "search_file_contents": lambda **a: search_file_contents(
+            a["path"], a["query"], a.get("glob", ""), a.get("max_depth", 8),
+            a.get("limit", 100), a.get("max_file_bytes", 1_000_000),
+        ),
         "recent_files": lambda **a: recent_files(a["path"], a.get("limit", 15)),
         "directory_tree": lambda **a: directory_tree(a["path"], a.get("depth", 2)),
         "preview_plan_for_desktop_cleanup": lambda **a: preview_plan_for_desktop_cleanup(a.get("desktop_path")),
         "preview_organize_folder": lambda **a: preview_organize_folder(a["path"], a.get("mode", "type")),
         "take_screenshot": lambda **a: take_screenshot(a.get("region")),
+        "get_screen_info": lambda **a: get_screen_info(),
+        "window_screenshot": lambda **a: window_screenshot(a["window_id"]),
         "ocr_image": lambda **a: ocr_image(a["path"], a.get("region")),
         "list_windows": lambda **a: list_windows(),
         "get_active_window": lambda **a: get_active_window(),
@@ -1151,9 +1552,13 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "wait_for_file": lambda **a: wait_for_file(a["path"], a.get("timeout_sec", 10.0)),
         "wait_for_process_exit": lambda **a: wait_for_process_exit(a["pid"], a.get("timeout_sec", 10.0)),
         "browser_extract_text": lambda **a: browser_extract_text(a.get("selector"), a.get("timeout_sec", 10.0)),
+        "browser_screenshot": lambda **a: browser_screenshot(a.get("selector"), a.get("full_page", False)),
         "browser_wait_for": lambda **a: browser_wait_for(a["selector"], a.get("timeout_sec", 10.0)),
+        "copy_to_clipboard": lambda **a: copy_to_clipboard(a["text"]),
         # Mutating
         "move_file": lambda **a: move_file(a["source"], a["destination"]),
+        "copy_file": lambda **a: copy_file(a["source"], a["destination"], a.get("overwrite", False)),
+        "delete_file_to_recycle_bin": lambda **a: delete_file_to_recycle_bin(a["path"]),
         "rename_file": lambda **a: rename_file(a["source"], a["new_name"]),
         "create_folder": lambda **a: create_folder(a["path"]),
         "organize_desktop_by_type": lambda **a: organize_desktop_by_type(a.get("desktop_path")),
@@ -1177,6 +1582,7 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "apply_patch": lambda **a: apply_patch(a["path"], a["unified_diff"]),
         # Shell (constrained)
         "run_command": lambda **a: run_command(a["command"], a.get("working_dir")),
+        "read_clipboard": lambda **a: read_clipboard(a.get("max_chars", 5000)),
         # Browser
         "open_url": lambda **a: open_url(a["url"]),
     }

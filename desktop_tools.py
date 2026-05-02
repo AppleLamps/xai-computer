@@ -165,6 +165,62 @@ def take_screenshot(region: dict[str, int] | None = None) -> dict[str, Any]:
     return {"ok": True, "path": str(path), "width": width, "height": height}
 
 
+def get_screen_info() -> dict[str, Any]:
+    monitors: list[dict[str, int]] = []
+    cursor: dict[str, int] | None = None
+    try:
+        mss = _load_mss()
+        with mss() as sct:
+            for idx, mon in enumerate(getattr(sct, "monitors", []) or []):
+                monitors.append({
+                    "index": idx,
+                    "x": int(mon.get("left", 0)),
+                    "y": int(mon.get("top", 0)),
+                    "width": int(mon.get("width", 0)),
+                    "height": int(mon.get("height", 0)),
+                })
+    except RuntimeError:
+        pass
+    except Exception:
+        pass
+    try:
+        pyautogui = _load_pyautogui()
+        pos = pyautogui.position()
+        cursor = {"x": int(pos.x), "y": int(pos.y)}
+    except Exception:
+        cursor = None
+    return {
+        "ok": True,
+        "monitors": monitors,
+        "monitor_count": max(0, len(monitors) - 1) if monitors else 0,
+        "cursor": cursor,
+        "scaling": "unknown",
+    }
+
+
+def window_screenshot(window_id: int) -> dict[str, Any]:
+    try:
+        _, win32gui, _, _ = _load_win32()
+        if not win32gui.IsWindow(window_id):
+            return {"ok": False, "error": f"Window not found: {window_id}"}
+        if win32gui.IsIconic(window_id):
+            return {"ok": False, "error": f"Window is minimized: {window_id}"}
+        left, top, right, bottom = win32gui.GetWindowRect(window_id)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Failed to inspect window {window_id}: {e}"}
+    width = max(0, int(right - left))
+    height = max(0, int(bottom - top))
+    if width <= 0 or height <= 0:
+        return {"ok": False, "error": f"Window has invalid bounds: {window_id}"}
+    result = take_screenshot({"x": int(left), "y": int(top), "width": width, "height": height})
+    if result.get("ok"):
+        result["window_id"] = window_id
+        result["region"] = {"x": int(left), "y": int(top), "width": width, "height": height}
+    return result
+
+
 def ocr_image(path: str, region: dict[str, int] | None = None) -> dict[str, Any]:
     try:
         fp = _resolve_ocr_path(path)

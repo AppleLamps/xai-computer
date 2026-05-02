@@ -43,6 +43,32 @@ class TestBrowserSession:
         assert result["text"] == "hello"
         page.wait_for_selector.assert_called_once_with("body", timeout=10000)
 
+    def test_browser_screenshot_captures_page(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(browser_tools, "_screenshots_dir", lambda: tmp_path)
+
+        def fake_screenshot(**kwargs: object) -> None:
+            Path(str(kwargs["path"])).write_bytes(b"png")
+
+        page = MagicMock()
+        page.screenshot.side_effect = fake_screenshot
+        monkeypatch.setattr(browser_tools, "_page", lambda: page)
+        result = browser_tools.browser_screenshot(full_page=True)
+        assert result["ok"] is True
+        assert Path(result["path"]).exists()
+        page.screenshot.assert_called_once()
+        assert page.screenshot.call_args.kwargs["full_page"] is True
+
+    def test_browser_screenshot_captures_selector(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(browser_tools, "_screenshots_dir", lambda: tmp_path)
+        locator = MagicMock()
+        locator.screenshot.side_effect = lambda **kwargs: Path(str(kwargs["path"])).write_bytes(b"png")
+        page = MagicMock(locator=lambda selector: locator)
+        monkeypatch.setattr(browser_tools, "_page", lambda: page)
+        result = browser_tools.browser_screenshot(selector="#app")
+        assert result["ok"] is True
+        assert result["selector"] == "#app"
+        locator.screenshot.assert_called_once()
+
     def test_browser_fill_redacts_preview(self, monkeypatch: pytest.MonkeyPatch) -> None:
         page = MagicMock()
         monkeypatch.setattr(browser_tools, "_page", lambda: page)

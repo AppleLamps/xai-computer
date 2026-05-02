@@ -35,6 +35,47 @@ class TestScreenshot:
         assert result["width"] == 64
         assert result["height"] == 32
 
+    def test_get_screen_info_returns_monitors_and_cursor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class FakeScreenMSS:
+            monitors = [
+                {"left": 0, "top": 0, "width": 128, "height": 64},
+                {"left": 0, "top": 0, "width": 128, "height": 64},
+            ]
+
+            def __enter__(self) -> "FakeScreenMSS":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                return False
+
+        monkeypatch.setattr(desktop_tools, "_load_mss", lambda: FakeScreenMSS)
+        monkeypatch.setattr(
+            desktop_tools,
+            "_load_pyautogui",
+            lambda: SimpleNamespace(position=lambda: SimpleNamespace(x=12, y=34)),
+        )
+        result = desktop_tools.get_screen_info()
+        assert result["ok"] is True
+        assert result["monitor_count"] == 1
+        assert result["cursor"] == {"x": 12, "y": 34}
+
+    def test_window_screenshot_captures_window_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        win32gui = SimpleNamespace(
+            IsWindow=lambda hwnd: hwnd == 22,
+            IsIconic=lambda hwnd: False,
+            GetWindowRect=lambda hwnd: (10, 20, 110, 70),
+        )
+        monkeypatch.setattr(desktop_tools, "_load_win32", lambda: (None, win32gui, None, None))
+        monkeypatch.setattr(
+            desktop_tools,
+            "take_screenshot",
+            lambda region: {"ok": True, "path": "shot.png", "width": region["width"], "height": region["height"]},
+        )
+        result = desktop_tools.window_screenshot(22)
+        assert result["ok"] is True
+        assert result["window_id"] == 22
+        assert result["region"] == {"x": 10, "y": 20, "width": 100, "height": 50}
+
 
 class TestOCR:
     def test_ocr_image_parses_lines(self, sample_files: Path, monkeypatch: pytest.MonkeyPatch) -> None:

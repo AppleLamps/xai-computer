@@ -110,6 +110,8 @@ def _action_class(tool: str) -> str:
         "create_folder",
         "organize_desktop_by_type",
         "organize_folder",
+        "copy_file",
+        "delete_file_to_recycle_bin",
         "write_file",
         "replace_in_file",
         "append_file",
@@ -120,9 +122,11 @@ def _action_class(tool: str) -> str:
         return "process_control"
     if tool == "focus_window":
         return "window_control"
+    if tool in ("read_clipboard", "window_screenshot"):
+        return "sensitive_read"
     if tool in ("move_mouse", "click", "scroll", "type_text", "press_hotkey"):
         return "desktop_input"
-    if tool in ("browser_navigate", "browser_click", "browser_fill", "browser_press", "browser_download"):
+    if tool in ("browser_navigate", "browser_click", "browser_fill", "browser_press", "browser_download", "browser_screenshot"):
         return "browser_control"
     if tool == "run_command":
         return "shell"
@@ -132,6 +136,11 @@ def _action_class(tool: str) -> str:
 def _action_label(tool: str, args: dict[str, Any]) -> str:
     if tool == "move_file":
         return f"MOVE {args.get('source', '?')} -> {args.get('destination', '?')}"
+    if tool == "copy_file":
+        suffix = " [OVERWRITE]" if args.get("overwrite") else ""
+        return f"COPY {args.get('source', '?')} -> {args.get('destination', '?')}{suffix}"
+    if tool == "delete_file_to_recycle_bin":
+        return f"RECYCLE FILE {args.get('path', '?')}"
     if tool == "rename_file":
         return f"RENAME {args.get('source', '?')} -> {args.get('new_name', '?')}"
     if tool == "create_folder":
@@ -196,6 +205,14 @@ def _action_label(tool: str, args: dict[str, Any]) -> str:
         selector = args.get("click_selector")
         suffix = f" selector={selector!r}" if selector else ""
         return f"BROWSER DOWNLOAD {domain}{suffix}"
+    if tool == "browser_screenshot":
+        selector = args.get("selector")
+        suffix = f" selector={selector!r}" if selector else " page"
+        return f"BROWSER SCREENSHOT{suffix} full_page={bool(args.get('full_page'))}"
+    if tool == "read_clipboard":
+        return f"READ CLIPBOARD (max {args.get('max_chars', 5000)} chars)"
+    if tool == "window_screenshot":
+        return f"WINDOW SCREENSHOT id={args.get('window_id', '?')}"
     if tool == "replace_in_file":
         return f"REPLACE IN FILE {args.get('path', '?')} [all={bool(args.get('replace_all'))}]"
     if tool == "append_file":
@@ -215,6 +232,10 @@ def _action_risk(tool: str, args: dict[str, Any] | None = None) -> str:
         if args and args.get("overwrite"):
             return "medium"
         return "low"
+    if tool == "copy_file":
+        return "medium" if args and args.get("overwrite") else "low"
+    if tool in ("delete_file_to_recycle_bin", "read_clipboard", "window_screenshot", "browser_screenshot"):
+        return "medium"
     if tool == "run_command":
         # Classify the command to determine risk tier
         if args:
@@ -265,6 +286,12 @@ def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
         return f"Scanning tree at {path}"
     if tool == "search_files":
         return f"Searching for '{args.get('query', '?')}' in {path}"
+    if tool == "get_file_info":
+        return f"Inspecting file info for {path}"
+    if tool == "recursive_find_files":
+        return f"Searching recursively in {path}"
+    if tool == "search_file_contents":
+        return f"Searching file contents in {path}"
     if tool == "recent_files":
         return f"Finding recent files in {path}"
     if tool == "largest_files":
@@ -282,6 +309,10 @@ def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
         return f"Opening {args.get('url', '?')}"
     if tool == "take_screenshot":
         return "Capturing screenshot"
+    if tool == "get_screen_info":
+        return "Inspecting screen info"
+    if tool == "window_screenshot":
+        return f"Capturing window screenshot id={args.get('window_id', '?')}"
     if tool == "ocr_image":
         return f"Running OCR on {path}"
     if tool == "list_windows":
@@ -303,8 +334,14 @@ def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
         return f"Waiting for process {args.get('pid', '?')} to exit"
     if tool == "browser_extract_text":
         return f"Extracting text from selector {args.get('selector', 'body')!r}"
+    if tool == "browser_screenshot":
+        return f"Capturing browser screenshot for {args.get('selector') or 'page'}"
     if tool == "browser_wait_for":
         return f"Waiting for browser selector {args.get('selector', '?')!r}"
+    if tool == "copy_to_clipboard":
+        return "Copying text to clipboard"
+    if tool == "read_clipboard":
+        return "Reading clipboard"
     return f"Running {tool}"
 
 
@@ -312,11 +349,14 @@ def _build_summary(actions: list[PlannedAction]) -> str:
     move_count = sum(1 for a in actions if a.tool_name in ("move_file", "rename_file"))
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
     org_count = sum(1 for a in actions if a.tool_name in ("organize_desktop_by_type", "organize_folder"))
+    copy_count = sum(1 for a in actions if a.tool_name == "copy_file")
+    recycle_count = sum(1 for a in actions if a.tool_name == "delete_file_to_recycle_bin")
     write_count = sum(1 for a in actions if a.tool_name == "write_file")
     edit_count = sum(1 for a in actions if a.tool_name in ("replace_in_file", "append_file", "apply_patch"))
     cmd_count = sum(1 for a in actions if a.tool_name == "run_command")
     process_count = sum(1 for a in actions if a.action_class == "process_control")
     window_count = sum(1 for a in actions if a.action_class == "window_control")
+    sensitive_count = sum(1 for a in actions if a.action_class == "sensitive_read")
     input_count = sum(1 for a in actions if a.action_class == "desktop_input")
     browser_count = sum(1 for a in actions if a.action_class == "browser_control")
 
@@ -325,6 +365,10 @@ def _build_summary(actions: list[PlannedAction]) -> str:
         parts.append(f"{move_count} file operation(s)")
     if folder_count:
         parts.append(f"{folder_count} folder(s) to create")
+    if copy_count:
+        parts.append(f"{copy_count} file copy operation(s)")
+    if recycle_count:
+        parts.append(f"{recycle_count} file(s) to recycle")
     if write_count:
         parts.append(f"{write_count} file(s) to write")
     if edit_count:
@@ -337,6 +381,8 @@ def _build_summary(actions: list[PlannedAction]) -> str:
         parts.append(f"{process_count} process action(s)")
     if window_count:
         parts.append(f"{window_count} window action(s)")
+    if sensitive_count:
+        parts.append(f"{sensitive_count} sensitive read(s)")
     if input_count:
         parts.append(f"{input_count} desktop input action(s)")
     if browser_count:
@@ -422,9 +468,14 @@ def _runtime_system_prompt() -> str:
         "Tool-selection guidance:\n"
         "- For Desktop questions, use the default Desktop path above directly.\n"
         "- Prefer dedicated read-only tools such as list_directory, recent_files, "
-        "largest_files, search_files, and directory_tree for inspection tasks.\n"
+        "largest_files, search_files, recursive_find_files, search_file_contents, "
+        "get_file_info, and directory_tree for inspection tasks.\n"
         "- Do not use run_command just to discover common paths, list files, or sort "
         "recent files when a dedicated read-only tool can do the job.\n"
+        "- Use copy_file and delete_file_to_recycle_bin for file copy/delete tasks; "
+        "never use shell commands for delete/copy when a dedicated tool applies.\n"
+        "- Use get_screen_info, window_screenshot, browser_screenshot, and clipboard "
+        "tools for visual or clipboard context instead of shell workarounds.\n"
         "- When reporting directory contents, use list_directory.files and "
         "list_directory.folders plus their explicit file_count/folder_count fields. "
         "Do not count mixed entries yourself unless no count field is available."

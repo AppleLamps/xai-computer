@@ -20,6 +20,18 @@ def _downloads_dir() -> Path:
     return path
 
 
+def _screenshots_dir() -> Path:
+    path = get_state_dir() / "screenshots" / SESSION_ID
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _screenshot_path() -> Path:
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    return _screenshots_dir() / f"browser_{stamp}.png"
+
+
 def _validate_http_url(url: str) -> str:
     cleaned = url.strip()
     if not cleaned:
@@ -107,6 +119,24 @@ def browser_extract_text(selector: str | None = None, timeout_sec: float = 10.0)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Failed extracting text: {e}"}
     return {"ok": True, "selector": selector, "text": text}
+
+
+def browser_screenshot(selector: str | None = None, full_page: bool = False) -> dict[str, Any]:
+    path = _screenshot_path()
+    if is_dry_run():
+        return {"ok": True, "dry_run": True, "path": str(path), "selector": selector, "full_page": full_page}
+    try:
+        page = _page()
+        if selector:
+            page.locator(selector).screenshot(path=str(path))
+        else:
+            page.screenshot(path=str(path), full_page=bool(full_page))
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Failed taking browser screenshot: {e}"}
+    log_event("browser_screenshot", {"path": str(path), "selector": selector, "full_page": full_page}, phase="executed")
+    return {"ok": True, "path": str(path), "selector": selector, "full_page": full_page}
 
 
 def browser_click(selector: str, timeout_sec: float = 10.0) -> dict[str, Any]:

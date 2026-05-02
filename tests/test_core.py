@@ -15,6 +15,7 @@ from core import (
     _tool_progress_label,
     build_approval_card,
 )
+from schemas import MUTATING_TOOL_NAMES
 from xai_client import ChatCompletionResult, ToolCallSpec
 
 
@@ -43,6 +44,24 @@ class TestPlannedAction:
 
     def test_risk_start_process_is_high(self) -> None:
         assert _action_risk("start_process", {"executable": "notepad.exe"}) == "high"
+
+    def test_new_tool_risks_and_labels(self) -> None:
+        assert _action_risk("copy_file", {"overwrite": False}) == "low"
+        assert _action_risk("copy_file", {"overwrite": True}) == "medium"
+        assert _action_risk("delete_file_to_recycle_bin", {"path": "a.txt"}) == "medium"
+        assert _action_risk("read_clipboard", {}) == "medium"
+        assert _action_risk("window_screenshot", {"window_id": 1}) == "medium"
+        assert _action_risk("browser_screenshot", {}) == "medium"
+        assert "COPY" in _action_label("copy_file", {"source": "a", "destination": "b"})
+        assert "RECYCLE" in _action_label("delete_file_to_recycle_bin", {"path": "a"})
+
+    def test_mutating_membership_for_sensitive_new_tools(self) -> None:
+        assert "copy_file" in MUTATING_TOOL_NAMES
+        assert "delete_file_to_recycle_bin" in MUTATING_TOOL_NAMES
+        assert "read_clipboard" in MUTATING_TOOL_NAMES
+        assert "window_screenshot" in MUTATING_TOOL_NAMES
+        assert "browser_screenshot" in MUTATING_TOOL_NAMES
+        assert "copy_to_clipboard" not in MUTATING_TOOL_NAMES
 
 
 class TestApprovalCard:
@@ -79,6 +98,12 @@ class TestApprovalCard:
         assert "browser action" in card.summary
         assert card.risk_level == "high"
 
+    def test_sensitive_read_summary(self) -> None:
+        card = build_approval_card([ToolCallSpec(id="1", name="read_clipboard", arguments={})])
+        assert card.action_class == "sensitive_read"
+        assert "sensitive read" in card.summary
+        assert card.risk_level == "medium"
+
 
 class TestToolProgressLabel:
     def test_list_directory(self) -> None:
@@ -102,6 +127,11 @@ class TestToolProgressLabel:
     def test_screenshot_label(self) -> None:
         label = _tool_progress_label("take_screenshot", {})
         assert "Capturing screenshot" in label
+
+    def test_new_readonly_tool_labels(self) -> None:
+        assert "Inspecting file info" in _tool_progress_label("get_file_info", {"path": "/x"})
+        assert "recursively" in _tool_progress_label("recursive_find_files", {"path": "/x"})
+        assert "file contents" in _tool_progress_label("search_file_contents", {"path": "/x"})
 
 
 class TestExecutionSummary:
@@ -223,6 +253,29 @@ class TestProcessToolCallsConversation:
         ]
         _process_tool_calls(messages, tool_calls, sink)
         assert sink.plan.call_count == 2
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    def test_sensitive_new_tools_request_approval(self, mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="clip", name="read_clipboard", arguments={"max_chars": 100}),
+            ToolCallSpec(id="shot", name="window_screenshot", arguments={"window_id": 5}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        sink.plan.assert_called_once()
+        card = sink.plan.call_args[0][0]
+        assert isinstance(card, ApprovalCard)
+        assert card.action_class == "sensitive_read"
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    def test_copy_to_clipboard_does_not_request_approval(self, mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        messages: list = []
+        tool_calls = [ToolCallSpec(id="copy", name="copy_to_clipboard", arguments={"text": "hello"})]
+        _process_tool_calls(messages, tool_calls, sink)
+        sink.plan.assert_not_called()
+        sink.progress.assert_called_once()
 
     def test_blocked_hotkey_skips_approval(self) -> None:
         sink = self._make_sink()

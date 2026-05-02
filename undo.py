@@ -109,6 +109,19 @@ def record_write_file(path: str, backup_path: str | None = None) -> None:
     })
 
 
+def record_copy_file(source: str, destination: str, backup_path: str | None = None) -> None:
+    """Record a file copy. New copies can be recycled; overwrites restore backup."""
+    _append_record({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "session": SESSION_ID,
+        "action": "copy_file",
+        "source": source,
+        "destination": destination,
+        "backup_path": backup_path,
+        "undone": False,
+    })
+
+
 def record_organize_move(source: str, destination: str) -> None:
     """Record a single file move done during desktop organization."""
     _append_record({
@@ -218,6 +231,46 @@ def undo_last() -> dict[str, Any]:
                 log_event("undo", {"action": action, "recycled": str(written)}, phase="undone")
                 return {"ok": True, "action": action, "removed": str(written),
                         "note": " (sent to Recycle Bin)"}
+
+        elif action == "copy_file":
+            copied = Path(rec["destination"])
+            backup = rec.get("backup_path")
+            if backup:
+                bak = Path(backup)
+                if not bak.exists():
+                    records[target_idx]["undone"] = True
+                    _save_all(records)
+                    return {"ok": False, "error": f"Backup file missing: {bak}"}
+                if copied.exists():
+                    try:
+                        from send2trash import send2trash
+                        send2trash(str(copied))
+                    except ImportError:
+                        copied.unlink()
+                    except Exception as e:
+                        return {"ok": False, "error": f"Cannot recycle copied file before restore: {e}"}
+                shutil.move(str(bak), str(copied))
+                records[target_idx]["undone"] = True
+                _save_all(records)
+                log_event("undo", {"action": action, "restored_backup": str(copied)}, phase="undone")
+                return {"ok": True, "action": action, "restored_to": str(copied),
+                        "note": " (overwritten file restored from backup)"}
+            if not copied.exists():
+                records[target_idx]["undone"] = True
+                _save_all(records)
+                return {"ok": False, "error": f"Copied file already gone: {copied}"}
+            try:
+                from send2trash import send2trash
+                send2trash(str(copied))
+            except ImportError:
+                copied.unlink()
+            except Exception as e:
+                return {"ok": False, "error": f"Cannot send copied file to Recycle Bin: {e}"}
+            records[target_idx]["undone"] = True
+            _save_all(records)
+            log_event("undo", {"action": action, "recycled": str(copied)}, phase="undone")
+            return {"ok": True, "action": action, "removed": str(copied),
+                    "note": " (copied file sent to Recycle Bin)"}
 
         elif action == "create_folder":
             folder = Path(rec["path"])

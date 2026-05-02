@@ -6,6 +6,12 @@ logs/
 state/
 .pytest_cache/
 *.egg-info/
+
+# Frontend build and package-manager artifacts
 web/node_modules/
 web/dist/
+web/.vite/
 web/tsconfig.tsbuildinfo
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*

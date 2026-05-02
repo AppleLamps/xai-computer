@@ -1,6 +1,12 @@
 # xai-computer
 
-A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. You can use it from the CLI or the local browser UI; Grok decides which tools to call; the app runs them locally after you approve. There is no shell execution of model-generated code, no permanent delete tool, and no unconfirmed mutations.
+A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. The main agent experience is the **local browser web app**: it gives you the transcript, approvals, progress, workspace controls, and tool activity in a more reliable interface than the old Tkinter GUI. The CLI remains supported for terminal-first use, and the Tkinter GUI is kept as a side project. There is no shell execution of model-generated code, no permanent delete tool, and no unconfirmed mutations.
+
+## Primary Interface
+
+Use the browser web app for normal agent work. Start it with `python web_server.py --open`; it serves the React frontend locally and uses the same core orchestration, tools, approval cards, undo stack, logging, and safety checks as the CLI.
+
+The CLI (`python app.py`) is useful for quick terminal sessions and debugging. The Tkinter GUI (`python gui.py`) is legacy/experimental and should not be treated as the primary product surface.
 
 ## What It Can Do
 
@@ -9,6 +15,7 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 - **Explain before acting** — describes the plan in the same message that contains tool calls, so you always know what's happening and why
 - **Retry failed operations** — when some file operations in a batch fail, the assistant offers to retry just the failed ones without re-running the ones that succeeded
 - **Move and rename files** — with explicit approval, collision-safe naming, and undo
+- **Copy and recycle files** — copy within allowed roots with undo; send approved deletes to the Recycle Bin only
 - **Organize folders** — by file type, by month, or by year (desktop or any allowed folder)
 - **Show recent or largest files** — quick answers about what's taking up space
 - **Read small text files** — peek at file contents (capped at 100 KB)
@@ -28,7 +35,7 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 
 ## What It Cannot Do
 
-- **Delete files or folders** — no delete tool exists
+- **Permanently delete files or folders** — delete actions go to the Recycle Bin only, after approval
 - **Run arbitrary shell commands** — only allowlisted or confirmed commands run; dangerous patterns (rm, del, format, pipe-to-shell, etc.) are blocked unconditionally and cannot be overridden, even by user approval
 - **Run model-generated code** — the model's output is never evaluated as code
 - **Access files outside allowed roots** — mutations are restricted to configured directories
@@ -41,7 +48,7 @@ A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer 
 
 The assistant enforces multiple safety layers:
 
-**Allowed roots.** File mutations (move, rename, create, organize) only work inside configured directories. By default these are your Desktop, Documents, and Downloads folders. Read-only tools (list, analyze, search) use the same boundary. Override with `XAI_ASSISTANT_ALLOWED_ROOTS`.
+**Allowed roots.** File mutations (move, rename, create, organize, copy, recycle) only work inside configured directories. By default these are your Desktop, Documents, and Downloads folders. Read-only tools (list, analyze, search) use the same boundary. Override with `XAI_ASSISTANT_ALLOWED_ROOTS`.
 
 **Path validation.** All paths are normalized and resolved before any operation. Path traversal (`..`) is rejected before resolution. Dangerous system locations (Windows, System32, Program Files, ProgramData, $Recycle.Bin) are blocked even if they somehow fall inside an allowed root.
 
@@ -49,7 +56,7 @@ The assistant enforces multiple safety layers:
 
 **Dry-run mode.** Toggle with `/dry-on`. Mutating actions simulate without touching the filesystem. Output is labeled `[DRY RUN]`.
 
-**Undo.** Moves, renames, folder creations, and file writes are recorded in `state/undo_history.jsonl`. Undo moves files back to their original location; if that location is occupied, the file is restored with a `_restored1` suffix. Empty folders created by the app can be undone. Undo never overwrites existing files and never deletes non-empty folders. Undo is scoped to the current session.
+**Undo.** Moves, renames, folder creations, file writes, and file copies are recorded in `state/undo_history.jsonl`. Undo moves files back to their original location; if that location is occupied, the file is restored with a `_restored1` suffix. Empty folders created by the app can be undone. Copied files can be sent to the Recycle Bin on undo. Undo never overwrites existing files and never deletes non-empty folders. Undo is scoped to the current session.
 
 **Hidden and system files.** Desktop organization skips dotfiles (`.gitignore`, `.env`), Office lock files (`~$*.docx`), and known system files (`desktop.ini`, `Thumbs.db`, `NTUSER.DAT`).
 
@@ -67,7 +74,7 @@ The assistant enforces multiple safety layers:
 User input
     |
     v
-  cli.py / web_server.py ── local UI surfaces and approval handoff
+  web_server.py / cli.py ── local UI surfaces and approval handoff
     |
     v
   core.py ── builds messages, calls xAI API, processes tool calls
@@ -103,10 +110,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details on each module.
 ## Project Structure
 
 ```
-app.py                CLI entry point
-web_server.py         Local HTTP API/static server for the browser UI
-web/                  Vite React TypeScript frontend for the browser UI
-gui.py                Legacy GUI entry point (Tkinter)
+web_server.py         Main local HTTP API/static server for the browser web agent
+web/                  Main Vite React TypeScript frontend for the browser web agent
+app.py                CLI entry point for terminal sessions
+gui.py                Legacy Tkinter GUI side project
 cli.py                Terminal I/O, slash commands, approval rendering
 core.py               Conversation loop, tool dispatch, ApprovalCard
 tools.py              Filesystem, analysis, shell, and browser-open tools
@@ -126,9 +133,9 @@ xai_client.py         Minimal HTTPS client for xAI chat completions
 pyproject.toml        Pytest configuration
 requirements.txt      Runtime dependencies
 .env.example          Template for environment variables
-tests/                318 tests
-logs/                 Runtime action logs (created automatically)
-state/                Undo history and browser downloads (created automatically)
+tests/                Python test suite
+logs/                 Runtime action logs (created automatically, ignored by Git)
+state/                Undo history, screenshots, and browser downloads (created automatically, ignored by Git)
 docs/                 Architecture and reference documentation
 ```
 
@@ -136,7 +143,7 @@ docs/                 Architecture and reference documentation
 
 - Windows 10 or later
 - Python 3.11 or later
-- Node.js 20 or later for the browser UI build/dev server
+- Node.js 20 or later for the browser web app build/dev server
 - An xAI API key from [console.x.ai](https://console.x.ai/)
 
 **Runtime dependencies** (installed via `pip install -r requirements.txt`):
@@ -178,13 +185,7 @@ Open `.env` in a text editor and paste your API key:
 XAI_API_KEY=xai-your-key-here
 ```
 
-Start the assistant (CLI):
-
-```powershell
-python app.py
-```
-
-Or launch the browser UI. In one terminal:
+Launch the main browser web agent:
 
 ```powershell
 python web_server.py --open
@@ -208,7 +209,13 @@ cd ..
 python web_server.py --open
 ```
 
-The old Tkinter GUI is still present for now, but the browser UI is the recommended interface:
+Run the CLI when you specifically want a terminal session:
+
+```powershell
+python app.py
+```
+
+The Tkinter GUI is still present as a side project:
 
 ```powershell
 python gui.py
@@ -239,7 +246,7 @@ All configuration is through environment variables in `.env`.
 
 ## Slash Commands
 
-Commands are handled locally and never sent to the model.
+These commands apply to the CLI. The browser web agent exposes the same controls through its sidebar and local API. Commands are handled locally and never sent to the model.
 
 | Command | Description | Example |
 |---|---|---|
@@ -261,7 +268,7 @@ Path arguments fall back to the last folder you inspected if omitted.
 
 ## Local Tools
 
-These are the functions the model can call. Read-only tools run immediately. Mutating tools require your approval.
+These are the functions the model can call. Read-only tools run immediately. Mutating tools require your approval. A few stateful or privacy-sensitive tools have their own approval behavior, noted below.
 
 ### Read-Only (no approval needed)
 
@@ -273,12 +280,16 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `file_type_summary` | Aggregate sizes by file extension and category |
 | `read_text_file` | Read the beginning of a text file (capped at 100 KB) |
 | `read_file_range` | Read a specific 1-based line range from a text file |
+| `get_file_info` | Return metadata, timestamps, attributes, and optional capped SHA-256 |
 | `search_files` | Find files by name substring (case-insensitive) |
+| `recursive_find_files` | Bounded recursive filename search under an allowed root |
+| `search_file_contents` | Bounded text search with line numbers and snippets |
 | `recent_files` | Most recently modified files in a directory |
 | `directory_tree` | Indented tree view (max depth 5, max 200 entries) |
 | `preview_plan_for_desktop_cleanup` | Preview how desktop files would be grouped by type |
 | `preview_organize_folder` | Preview organization of any folder (by type, month, or year) |
 | `take_screenshot` | Capture a PNG of the full desktop or a screen region |
+| `get_screen_info` | Return monitor bounds, scaling best-effort, and cursor position |
 | `ocr_image` | Extract text and bounding boxes from an image or screenshot |
 | `list_windows` | List all visible top-level desktop windows |
 | `get_active_window` | Return the currently focused window |
@@ -296,6 +307,8 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 |---|---|
 | `move_file` | Move a file to a new location |
 | `rename_file` | Rename a file (basename only, no directory change) |
+| `copy_file` | Copy a file within allowed roots, collision-safe unless overwrite is requested |
+| `delete_file_to_recycle_bin` | Send a file to the Recycle Bin; there is no permanent delete tool |
 | `create_folder` | Create a folder and any missing parents |
 | `organize_desktop_by_type` | Sort desktop files into category subfolders |
 | `organize_folder` | Sort any allowed folder by type, month, or year |
@@ -317,6 +330,15 @@ These are the functions the model can call. Read-only tools run immediately. Mut
 | `browser_fill` | Fill a form field on the current browser page |
 | `browser_press` | Press a key on a focused element on the current browser page |
 | `browser_download` | Download a file via URL, click trigger, or both |
+
+### Stateful or Sensitive
+
+| Tool | What it does |
+|---|---|
+| `copy_to_clipboard` | Copy text to the clipboard without approval; logs/results include only redacted previews |
+| `read_clipboard` | Read clipboard text after approval because it may contain secrets |
+| `window_screenshot` | Capture a specific desktop window by window ID after approval |
+| `browser_screenshot` | Capture the current browser page or a selector after approval |
 
 ### Browser (open in system browser)
 
@@ -500,7 +522,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Current status: **318 tests passing** across 11 test modules covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, all read-only tools, dry-run behavior, shell command classification (blocked/safe/risky tiers, chaining detection, subshell detection, output truncation, secret redaction, `shell=True` static check), undo recording and reversal, batch undo (`undo_n`), collision-safe restore, API retry with exponential backoff, partial batch retry, model switching, verbose mode, session state, approval card construction, browser tool dispatch, desktop tool dispatch, editor tool dispatch, and process tool dispatch.
+Current status: **409 tests passing** across the Python test suite covering path safety, traversal rejection, confirmation parsing, file classification, duplicate detection, read-only tools, dry-run behavior, shell command classification, undo recording and reversal, API retry behavior, model switching, session state, approval card construction, web API behavior, browser tool dispatch, desktop tool dispatch, editor tool dispatch, and process tool dispatch.
 
 ## Troubleshooting
 
@@ -530,9 +552,9 @@ Current status: **318 tests passing** across 11 test modules covering path safet
 
 **Hotkey blocked** — Alt+F4, Win+R, Ctrl+Alt+Del, Win+X, and Win+L are permanently blocked. Use the matching action (close app, run dialog, etc.) via a safer tool instead.
 
-## Desktop GUI
+## Desktop GUI Side Project
 
-A Tkinter-based GUI is available as an alternative to the CLI. It shares the same core orchestration, tools, safety model, and undo system.
+A Tkinter-based GUI is still available as a side project and compatibility surface. It shares the same core orchestration, tools, safety model, and undo system, but the browser web app is the main interface going forward.
 
 ```powershell
 python gui.py
@@ -554,7 +576,7 @@ python gui.py
 - No per-step partial approval (approve-all or cancel-all only)
 - No system tray or background monitoring
 - No packaged installer — run from source with `python gui.py`
-- Visual design is plain and functional, not polished
+- Visual design and layout are not the primary focus now that the web app is the main agent surface
 
 ### Safety in the GUI
 
@@ -573,4 +595,4 @@ Possible future directions (not committed):
 - Richer MIME-based file classification
 - Responses API migration for newer xAI agentic features
 - Stronger OneDrive and cloud-synced folder handling
-- Packaged installer for the GUI
+- Continued polish for the browser web agent

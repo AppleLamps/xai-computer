@@ -229,7 +229,7 @@ class AssistantApp:
         if _DND_AVAILABLE:
             try:
                 return TkinterDnD.Tk()
-            except tk.TclError:
+            except Exception:
                 pass
         return tk.Tk()
 

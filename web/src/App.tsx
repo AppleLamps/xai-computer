@@ -4,10 +4,8 @@ import {
   Check,
   ClipboardCheck,
   FolderOpen,
-  History,
   Loader2,
   Monitor,
-  Play,
   RotateCcw,
   Send,
   Shield,
@@ -31,6 +29,7 @@ import {
 type TranscriptItem =
   | { id: string; role: "user" | "assistant" | "info" | "error" | "progress"; text: string; ts?: string }
   | { id: string; role: "approval"; card: ApprovalCard; ts?: string };
+type ProgressItem = { id: string; role: "progress"; text: string; ts?: string };
 
 const quickPrompts = [
   "List what's on my Desktop and tell me the 5 most recently modified files.",
@@ -46,18 +45,86 @@ function textFromEvent(event: WebEvent): TranscriptItem | null {
   if (event.kind === "error") return { id: String(event.id), role: "error", text, ts: event.ts };
   if (event.kind === "progress") return { id: String(event.id), role: "progress", text, ts: event.ts };
   if (event.kind === "approval") return { id: String(event.id), role: "approval", card: event.payload.card as ApprovalCard, ts: event.ts };
-  if (event.kind === "tool_start") {
-    return { id: String(event.id), role: "progress", text: `Working: ${String(event.payload.label ?? event.payload.name ?? "tool")}`, ts: event.ts };
-  }
-  if (event.kind === "tool_end") {
-    return { id: String(event.id), role: "progress", text: `${event.payload.ok ? "Finished" : "Failed"}: ${String(event.payload.name ?? "tool")}`, ts: event.ts };
-  }
-  if (event.kind === "done") return { id: String(event.id), role: "info", text: "Turn complete.", ts: event.ts };
   return null;
 }
 
 function cls(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
+}
+
+function cleanProgress(text: string): string {
+  return text.replace(/^\s*[↳└\-]+\s*/, "").trim();
+}
+
+function InlineText({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (part.startsWith("**") && part.endsWith("**")) {
+          return <strong key={index}>{part.slice(2, -2)}</strong>;
+        }
+        if (part.startsWith("`") && part.endsWith("`")) {
+          return <code key={index}>{part.slice(1, -1)}</code>;
+        }
+        return <span key={index}>{part}</span>;
+      })}
+    </>
+  );
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.split(/\r?\n/);
+  return (
+    <div className="markdown-text">
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div className="md-space" key={index} />;
+        const bullet = trimmed.match(/^[-•]\s+(.*)$/);
+        if (bullet) {
+          return (
+            <div className="md-bullet" key={index}>
+              <span className="md-dot" />
+              <span><InlineText text={bullet[1]} /></span>
+            </div>
+          );
+        }
+        if (/^\d+\.\s+/.test(trimmed)) {
+          const [num, ...rest] = trimmed.split(/\s+/);
+          return (
+            <div className="md-numbered" key={index}>
+              <span>{num}</span>
+              <span><InlineText text={rest.join(" ")} /></span>
+            </div>
+          );
+        }
+        return <p key={index}><InlineText text={trimmed} /></p>;
+      })}
+    </div>
+  );
+}
+
+function ProgressCluster({ items }: { items: ProgressItem[] }) {
+  if (!items.length) return null;
+  const shown = items.slice(-8);
+  const hidden = Math.max(0, items.length - shown.length);
+  return (
+    <div className="progress-cluster">
+      <div className="progress-title">
+        <span className="activity-mark" />
+        <span>Activity</span>
+        {hidden > 0 && <em>{hidden} earlier</em>}
+      </div>
+      <div className="progress-list">
+        {shown.map((item) => (
+          <div className="progress-row" key={item.id}>
+            <span className="progress-node" />
+            <span>{cleanProgress(item.text)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function App() {
@@ -273,12 +340,27 @@ export function App() {
                 </div>
               </div>
             ) : (
-              groupedItems.map((item) => (
-                <article key={item.id} className={cls("message", item.role)}>
-                  <div className="message-role">{item.role}</div>
-                  <div className="message-text">{item.text}</div>
-                </article>
-              ))
+              groupedItems.map((item, index) => {
+                if (item.role === "progress") {
+                  const previous = groupedItems[index - 1];
+                  if (previous?.role === "progress") return null;
+                  const cluster: ProgressItem[] = [];
+                  for (let i = index; i < groupedItems.length; i += 1) {
+                    const candidate = groupedItems[i];
+                    if (candidate.role !== "progress") break;
+                    cluster.push(candidate as ProgressItem);
+                  }
+                  return <ProgressCluster key={item.id} items={cluster} />;
+                }
+                return (
+                  <article key={item.id} className={cls("message", item.role)}>
+                    <div className="message-role">{item.role}</div>
+                    <div className="message-text">
+                      {item.role === "assistant" ? <MarkdownText text={item.text} /> : item.text}
+                    </div>
+                  </article>
+                );
+              })
             )}
           </div>
 

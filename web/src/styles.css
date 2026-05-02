@@ -259,6 +259,7 @@ button {
   border: 1px solid #dce4eb;
   border-radius: 8px;
   padding: 18px;
+  scroll-behavior: smooth;
 }
 
 .welcome {
@@ -295,9 +296,9 @@ button {
 }
 
 .message {
-  max-width: 920px;
+  max-width: 860px;
   margin: 0 0 14px;
-  padding: 13px 14px;
+  padding: 14px 16px;
   border-radius: 8px;
   border: 1px solid transparent;
 }
@@ -305,18 +306,18 @@ button {
 .message-role {
   margin-bottom: 6px;
   color: #60707d;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
 .message-text {
-  white-space: pre-wrap;
   line-height: 1.5;
 }
 
 .message.user {
+  max-width: min(860px, 78%);
   margin-left: auto;
   background: #e7f0ff;
   border-color: #d5e4fb;
@@ -325,14 +326,6 @@ button {
 .message.assistant {
   background: #ffffff;
   border-color: #dde6ee;
-}
-
-.message.progress {
-  padding: 6px 0;
-  margin: 0 0 4px 12px;
-  color: #217345;
-  background: transparent;
-  font-size: 13px;
 }
 
 .message.info {
@@ -357,6 +350,121 @@ button {
   padding: 10px;
   border: 1px solid #ffd2d2;
   border-radius: 8px;
+}
+
+.markdown-text p {
+  margin: 0 0 10px;
+}
+
+.markdown-text p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-text strong {
+  font-weight: 800;
+  color: #101a24;
+}
+
+.markdown-text code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #edf2f6;
+  color: #263847;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.md-space {
+  height: 8px;
+}
+
+.md-bullet,
+.md-numbered {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  margin: 5px 0;
+  line-height: 1.48;
+}
+
+.md-dot {
+  width: 5px;
+  height: 5px;
+  margin-top: 0.65em;
+  border-radius: 999px;
+  background: #57708a;
+  justify-self: center;
+}
+
+.md-numbered > span:first-child {
+  color: #60707d;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.progress-cluster {
+  max-width: 860px;
+  margin: 4px 0 16px;
+  padding: 10px 14px 12px;
+  border: 1px solid #d9eadf;
+  border-radius: 8px;
+  background: #f5fbf7;
+  color: #235b38;
+}
+
+.progress-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #2d6b42;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.activity-mark {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #42a66a;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px #dff2e5;
+}
+
+.progress-title em {
+  margin-left: auto;
+  color: #6f927b;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.progress-list {
+  display: grid;
+  gap: 6px;
+}
+
+.progress-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.progress-node {
+  width: 7px;
+  height: 7px;
+  margin-top: 0.4em;
+  border-radius: 999px;
+  background: #42a66a;
+  box-shadow: 0 0 0 3px #dff2e5;
 }
 
 .composer {

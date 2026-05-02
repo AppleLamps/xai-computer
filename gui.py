@@ -456,6 +456,7 @@ class AssistantApp:
         self._approval_inner = tk.Frame(self._approval_outer, bg=_BG_APPROVAL,
                                         padx=14, pady=10)
         self._approval_inner.pack(fill=tk.BOTH)
+        self._approval_wrap_labels: list[tuple[tk.Label, int]] = []
 
         # Right: sidebar
         sidebar = tk.Frame(body, bg=_BG_SIDE, width=_SIDE_W)
@@ -1069,18 +1070,43 @@ class AssistantApp:
     # APPROVAL PANEL
     # ===================================================================
 
+    def _track_approval_wrap(self, label: tk.Label, margin: int = 32) -> None:
+        self._approval_wrap_labels.append((label, margin))
+
+    def _sync_approval_wraps(self, event: tk.Event | None = None) -> None:
+        width = int(getattr(event, "width", 0) or self._approval_inner.winfo_width())
+        if width <= 1:
+            return
+        for label, margin in self._approval_wrap_labels:
+            try:
+                label.config(wraplength=max(180, width - margin))
+            except tk.TclError:
+                pass
+
     def show_approval_card(self, card: ApprovalCard, sink: GuiSink, generation: int = 0) -> None:
         inner = self._approval_inner
         for w in inner.winfo_children():
             w.destroy()
+        self._approval_wrap_labels.clear()
 
         dry_tag = "  [DRY RUN]" if card.dry_run else ""
         is_high = card.risk_level == "high"
         is_medium = card.risk_level == "medium"
+        n_actions = len(card.actions)
+        needs_scroll = n_actions > _APPROVAL_MAX_ACTIONS_VISIBLE
 
         # Set border color by risk level
         border_color = _APPROVAL_BORDER_HIGH if is_high else _APPROVAL_BORDER
         self._approval_outer.config(bg=border_color)
+
+        def _cleanup_and_resolve(answer: str) -> None:
+            for w in self._approval_scroll_widgets:
+                try:
+                    w.unbind("<MouseWheel>")
+                except tk.TclError:
+                    pass
+            self._approval_scroll_widgets.clear()
+            self._resolve_approval(answer, sink, generation)
 
         # Title row
         title_frame = tk.Frame(inner, bg=_BG_APPROVAL)
@@ -1108,6 +1134,41 @@ class AssistantApp:
             font=self._f_ui_sm_bold, bg=risk_bg, fg=risk_fg, padx=8, pady=2,
         ).pack(side=tk.RIGHT)
 
+        # Buttons live near the top so they remain visible even when action
+        # details wrap or the window is short/narrow.
+        btn_frame = tk.Frame(inner, bg=_BG_APPROVAL)
+        btn_frame.pack(fill=tk.X, pady=(8, 6))
+        btn_frame.grid_columnconfigure(0, weight=1, uniform="approval_btns")
+        btn_frame.grid_columnconfigure(1, weight=1, uniform="approval_btns")
+
+        btn_approve = tk.Button(
+            btn_frame, text="Approve", font=self._f_approval_btn,
+            bg=_BTN_APPROVE_BG, fg="white",
+            activebackground="#388e3c", activeforeground="white",
+            relief=tk.FLAT, cursor="hand2", padx=10, pady=5,
+            command=lambda: _cleanup_and_resolve("yes"),
+        )
+        btn_approve.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._hover_button(btn_approve, _BTN_APPROVE_BG, _BTN_APPROVE_HOVER_BG)
+
+        btn_cancel = tk.Button(
+            btn_frame, text="Cancel", font=self._f_ui_sm_bold,
+            bg=_BTN_CANCEL_BG, fg="white",
+            activebackground="#c62828", activeforeground="white",
+            relief=tk.FLAT, cursor="hand2", padx=10, pady=5,
+            command=lambda: _cleanup_and_resolve("cancel"),
+        )
+        btn_cancel.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._hover_button(btn_cancel, _BTN_CANCEL_BG, _BTN_CANCEL_HOVER_BG)
+
+        count_text = f"{n_actions} action(s)"
+        if needs_scroll:
+            count_text += " (scroll to see all)"
+        tk.Label(
+            btn_frame, text=count_text, font=self._f_ui_sm,
+            bg=_BG_APPROVAL, fg=_FG_DIM, anchor=tk.W,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+
         # Extra warnings for shell commands
         has_shell = any(a.tool_name == "run_command" for a in card.actions)
         if has_shell:
@@ -1129,31 +1190,32 @@ class AssistantApp:
                                    ("Risk", "risk_reason")]:
                     val = exp.get(key, "")
                     if val:
-                        tk.Label(
+                        exp_label = tk.Label(
                             exp_frame,
                             text=f"  {label}: {val}",
                             font=self._f_ui_sm, bg=_BG_APPROVAL, fg=_FG_LABEL,
-                            anchor=tk.W, wraplength=560, justify=tk.LEFT,
-                        ).pack(anchor=tk.W)
+                            anchor=tk.W, justify=tk.LEFT,
+                        )
+                        exp_label.pack(fill=tk.X, anchor=tk.W)
+                        self._track_approval_wrap(exp_label, margin=44)
 
         # Scope + summary
         meta_parts: list[str] = []
         if card.affected_root:
             meta_parts.append(f"Scope: {card.affected_root}")
         meta_parts.append(card.summary)
-        tk.Label(
+        meta_label = tk.Label(
             inner, text="  |  ".join(meta_parts), font=self._f_ui_sm,
             bg=_BG_APPROVAL, fg=_FG_DIM, anchor=tk.W,
-            wraplength=600, justify=tk.LEFT,
-        ).pack(fill=tk.X, pady=(2, 6))
+            justify=tk.LEFT,
+        )
+        meta_label.pack(fill=tk.X, pady=(2, 6))
+        self._track_approval_wrap(meta_label, margin=32)
 
         # Divider
         tk.Frame(inner, bg="#e0c080", height=1).pack(fill=tk.X, pady=(0, 4))
 
         # Action list — scrollable if large
-        n_actions = len(card.actions)
-        needs_scroll = n_actions > _APPROVAL_MAX_ACTIONS_VISIBLE
-
         # Track scroll binding so it can be cleaned up reliably
         self._approval_scroll_widgets: list[tk.Widget] = []
 
@@ -1171,8 +1233,12 @@ class AssistantApp:
                 "<Configure>",
                 lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
             )
-            canvas.create_window((0, 0), window=actions_frame, anchor=tk.NW)
+            canvas_window = canvas.create_window((0, 0), window=actions_frame, anchor=tk.NW)
             canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.bind(
+                "<Configure>",
+                lambda e, c=canvas, w=canvas_window: c.itemconfigure(w, width=e.width),
+            )
 
             canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
             scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1210,9 +1276,10 @@ class AssistantApp:
             act_lbl = tk.Label(
                 row, text=f"{action.label}{marker}", font=self._f_mono,
                 bg=_BG_APPROVAL_ROW, fg=marker_fg, anchor=tk.W,
-                wraplength=520, justify=tk.LEFT,
+                justify=tk.LEFT,
             )
             act_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self._track_approval_wrap(act_lbl, margin=80)
 
             # Propagate scroll to all child widgets in the scrollable case
             if _on_mousewheel is not None:
@@ -1220,52 +1287,12 @@ class AssistantApp:
                     w.bind("<MouseWheel>", _on_mousewheel)
                     self._approval_scroll_widgets.append(w)
 
-        # Divider
-        tk.Frame(inner, bg="#e0c080", height=1).pack(fill=tk.X, pady=(4, 8))
-
-        # Buttons — always visible, never scrolled
-        btn_frame = tk.Frame(inner, bg=_BG_APPROVAL)
-        btn_frame.pack(fill=tk.X)
-
-        def _cleanup_and_resolve(answer: str) -> None:
-            for w in self._approval_scroll_widgets:
-                try:
-                    w.unbind("<MouseWheel>")
-                except tk.TclError:
-                    pass
-            self._approval_scroll_widgets.clear()
-            self._resolve_approval(answer, sink, generation)
-
-        btn_approve = tk.Button(
-            btn_frame, text="  Approve  ", font=self._f_approval_btn,
-            bg=_BTN_APPROVE_BG, fg="white",
-            activebackground="#388e3c", activeforeground="white",
-            relief=tk.FLAT, cursor="hand2", padx=12, pady=4,
-            command=lambda: _cleanup_and_resolve("yes"),
-        )
-        btn_approve.pack(side=tk.LEFT, padx=(0, 10))
-        self._hover_button(btn_approve, _BTN_APPROVE_BG, _BTN_APPROVE_HOVER_BG)
-
-        btn_cancel = tk.Button(
-            btn_frame, text="  Cancel  ", font=self._f_ui_sm_bold,
-            bg=_BTN_CANCEL_BG, fg="white",
-            activebackground="#c62828", activeforeground="white",
-            relief=tk.FLAT, cursor="hand2", padx=12, pady=4,
-            command=lambda: _cleanup_and_resolve("cancel"),
-        )
-        btn_cancel.pack(side=tk.LEFT)
-        self._hover_button(btn_cancel, _BTN_CANCEL_BG, _BTN_CANCEL_HOVER_BG)
-
-        count_text = f"{n_actions} action(s)"
-        if needs_scroll:
-            count_text += f" (scroll to see all)"
-        tk.Label(
-            btn_frame, text=count_text, font=self._f_ui_sm,
-            bg=_BG_APPROVAL, fg=_FG_DIM,
-        ).pack(side=tk.RIGHT)
-
         # Show panel
-        self._approval_outer.pack(fill=tk.X, side=tk.BOTTOM, padx=6, pady=(0, 2))
+        self._approval_outer.pack(
+            fill=tk.X, side=tk.BOTTOM, padx=6, pady=(0, 2), before=self._chat,
+        )
+        inner.bind("<Configure>", self._sync_approval_wraps)
+        self.root.after(1, self._sync_approval_wraps)
         self._set_input_status("Approval needed", _STATUS_BUSY)
 
         # Echo to transcript
@@ -1287,6 +1314,7 @@ class AssistantApp:
             except tk.TclError:
                 pass
         self._approval_scroll_widgets.clear()
+        self._approval_wrap_labels.clear()
 
         self._approval_outer.pack_forget()
         if answer == "yes":
@@ -1308,6 +1336,7 @@ class AssistantApp:
             except tk.TclError:
                 pass
         self._approval_scroll_widgets.clear()
+        self._approval_wrap_labels.clear()
         try:
             self._approval_outer.pack_forget()
         except tk.TclError:

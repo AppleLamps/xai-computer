@@ -126,28 +126,14 @@ class TestStructuredParseFallback:
     def test_sdk_exception_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from xai_structured import structured_parse
 
-        def _mock_import_error(*args, **kwargs):
-            raise RuntimeError("SDK connection failed")
-
-        monkeypatch.setattr("xai_structured.get_xai_api_key", lambda: "test-key")
-        # Patch the SDK import inside structured_parse to raise
-        import xai_structured
-        original_parse = xai_structured.structured_parse
-
-        def _failing_parse(model_class, prompt, *, system_prompt="", model=None):
-            # Simulate the SDK import succeeding but the API call failing
-            raise RuntimeError("Network error")
-
-        # We can't easily patch inside the function's try block,
-        # so test the outer wrapper's exception handling
+        monkeypatch.setattr("xai_structured.get_xai_api_key", lambda: None)
         result = structured_parse(
             ShellCommandExplanation,
             "explain git status",
             model="grok-4-1-fast-reasoning",
         )
-        # This will either return None (if no real API key) or try the real API
-        # The important thing is it doesn't crash
-        assert result is None or isinstance(result, ShellCommandExplanation)
+        # No SDK/API call should be attempted during tests.
+        assert result is None
 
 
 class TestExplainShellCommand:

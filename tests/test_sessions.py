@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from core import ApprovalCard, PlannedAction
 
 try:
     import tkinter as tk
@@ -101,3 +102,45 @@ class TestSessionRoundTrip:
         rendered = app._chat.get("1.0", "end-1c")
         assert "**Files and folders:**" not in rendered
         assert rendered.count("Files and folders:") == 1
+
+    def test_approval_buttons_visible_at_min_width(self, app) -> None:
+        app.root.deiconify()
+        app.root.geometry("720x520")
+        app._hide_welcome()
+        app.root.update()
+
+        class Sink:
+            def resolve_confirmation(self, answer: str, generation: int | None = None) -> None:
+                self.answer = answer
+
+        card = ApprovalCard(
+            actions=[
+                PlannedAction(
+                    index=1,
+                    tool_name="run_command",
+                    arguments={
+                        "command": "python -m pytest tests/test_core.py",
+                        "working_dir": "C:\\Users\\lucas\\Desktop\\xai-computer",
+                    },
+                )
+            ],
+            risk_level="high",
+        )
+        app.show_approval_card(card, Sink(), generation=1)
+        app.root.update()
+
+        buttons = [
+            w for w in app._approval_inner.winfo_children()[1].winfo_children()
+            if getattr(w, "cget", None) and str(w.cget("text")).strip() in {"Approve", "Cancel"}
+        ]
+        assert {str(b.cget("text")).strip() for b in buttons} == {"Approve", "Cancel"}
+        root_left = app.root.winfo_rootx()
+        root_right = root_left + app.root.winfo_width()
+        root_top = app.root.winfo_rooty()
+        root_bottom = root_top + app.root.winfo_height()
+        for button in buttons:
+            assert button.winfo_ismapped()
+            assert root_left <= button.winfo_rootx() < root_right
+            assert button.winfo_rootx() + button.winfo_width() <= root_right
+            assert root_top <= button.winfo_rooty() < root_bottom
+            assert button.winfo_rooty() + button.winfo_height() <= root_bottom

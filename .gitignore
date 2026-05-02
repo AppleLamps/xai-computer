@@ -6,3 +6,6 @@ logs/
 state/
 .pytest_cache/
 *.egg-info/
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

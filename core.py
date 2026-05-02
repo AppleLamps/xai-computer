@@ -346,6 +346,162 @@ def _tool_progress_label(tool: str, args: dict[str, Any]) -> str:
     return f"Running {tool}"
 
 
+def _brief_path(path: Any) -> str:
+    text = str(path or "").strip()
+    return text if text else "the requested location"
+
+
+def _tool_intent_fragment(tool: str, args: dict[str, Any]) -> str:
+    path = _brief_path(args.get("path") or args.get("desktop_path"))
+    if tool == "list_directory":
+        return f"list files and folders in {path}"
+    if tool == "analyze_directory":
+        return f"analyze file types, sizes, and likely duplicates in {path}"
+    if tool == "directory_tree":
+        return f"scan a bounded folder tree at {path}"
+    if tool == "search_files":
+        return f"search names in {path} for {args.get('query', '?')!r}"
+    if tool == "recursive_find_files":
+        return f"search names recursively in {path} with depth and result limits"
+    if tool == "search_file_contents":
+        return f"search bounded text files in {path} for {args.get('query', '?')!r}, skipping binary or oversized files"
+    if tool == "get_file_info":
+        return f"inspect metadata for {path}"
+    if tool == "recent_files":
+        return f"find the most recently modified files in {path}"
+    if tool == "largest_files":
+        return f"find the largest files in {path}"
+    if tool == "file_type_summary":
+        return f"summarize file types in {path}"
+    if tool == "read_text_file":
+        return f"read a capped preview of {path}"
+    if tool == "copy_to_clipboard":
+        return "copy the prepared text to your clipboard"
+    if tool == "read_clipboard":
+        return "read clipboard text after approval because it may contain private data"
+    if tool == "copy_file":
+        return f"copy {args.get('source', '?')} to {args.get('destination', '?')}"
+    if tool == "delete_file_to_recycle_bin":
+        return f"send {args.get('path', '?')} to the Recycle Bin"
+    if tool == "write_file":
+        return f"write {args.get('path', '?')} with backup and undo support"
+    if tool == "replace_in_file":
+        return f"replace text in {args.get('path', '?')} with backup and undo support"
+    if tool == "append_file":
+        return f"append text to {args.get('path', '?')} with undo support"
+    if tool == "apply_patch":
+        return f"apply a patch to {args.get('path', '?')} with backup and undo support"
+    if tool == "window_screenshot":
+        return f"capture a screenshot of window id={args.get('window_id', '?')} after approval"
+    if tool == "browser_screenshot":
+        return f"capture a browser screenshot for {args.get('selector') or 'the current page'} after approval"
+    if tool.startswith("browser_"):
+        return _tool_progress_label(tool, args).casefold()
+    if tool in ("take_screenshot", "get_screen_info", "ocr_image", "list_windows", "get_active_window", "list_processes"):
+        label = _tool_progress_label(tool, args)
+        return label[:1].lower() + label[1:]
+    if tool == "run_command":
+        return f"run a guarded shell command: {args.get('command', '?')}"
+    return _tool_progress_label(tool, args)[:1].lower() + _tool_progress_label(tool, args)[1:]
+
+
+def _join_fragments(fragments: list[str]) -> str:
+    if not fragments:
+        return "check the requested context"
+    if len(fragments) == 1:
+        return fragments[0]
+    if len(fragments) == 2:
+        return f"{fragments[0]} and {fragments[1]}"
+    return f"{', '.join(fragments[:-1])}, and {fragments[-1]}"
+
+
+def _fallback_tool_narration(tool_calls: list[ToolCallSpec]) -> str:
+    fragments = [_tool_intent_fragment(tc.name, tc.arguments) for tc in tool_calls[:3]]
+    extra = len(tool_calls) - len(fragments)
+    if extra > 0:
+        fragments.append(f"{extra} more step{'s' if extra != 1 else ''}")
+    text = f"I’ll {_join_fragments(fragments)}."
+    if any(tc.name in MUTATING_TOOL_NAMES for tc in tool_calls):
+        text += " I’ll ask for approval before anything that can change state or expose sensitive local context."
+    else:
+        text += " These are read-only checks, so I’ll start by gathering facts."
+    return text
+
+
+def _is_generic_tool_preamble(text: str | None) -> bool:
+    cleaned = (text or "").strip().casefold()
+    if not cleaned:
+        return True
+    cleaned = re.sub(r"[.!?\s]+$", "", cleaned)
+    generic = {
+        "ok",
+        "okay",
+        "sure",
+        "sounds good",
+        "i'll do that",
+        "i will do that",
+        "i'll check",
+        "i will check",
+        "let me check",
+        "working on it",
+        "i'll take a look",
+        "i will take a look",
+    }
+    return cleaned in generic or (len(cleaned) < 18 and not any(ch in cleaned for ch in (":", "\\", "/")))
+
+
+def _approval_reason(card: ApprovalCard) -> str:
+    summary = card.summary or "the requested action"
+    if card.action_class == "filesystem_write":
+        return f"I need your approval before changing files or folders. This batch is {summary}."
+    if card.action_class == "sensitive_read":
+        return f"I need your approval because this may expose private screen or clipboard content. This batch is {summary}."
+    if card.action_class == "browser_control":
+        return f"I need your approval before controlling the browser or saving browser output. This batch is {summary}."
+    if card.action_class == "desktop_input":
+        return f"I need your approval before moving the mouse, clicking, typing, scrolling, or pressing keys. This batch is {summary}."
+    if card.action_class == "process_control":
+        return f"I need your approval before starting or stopping local processes. This batch is {summary}."
+    if card.action_class == "shell":
+        return f"I need your approval before running a guarded shell command. This batch is {summary}."
+    if card.action_class == "window_control":
+        return f"I need your approval before changing desktop window focus. This batch is {summary}."
+    return f"I need your approval before continuing with {summary}."
+
+
+def _tool_result_note(tool: str, result: dict[str, Any]) -> str:
+    if not result.get("ok"):
+        return ""
+    if tool == "search_file_contents":
+        parts = [
+            f"{result.get('count', 0)} match(es)",
+            f"{result.get('scanned_files', 0)} file(s) scanned",
+        ]
+        skipped = int(result.get("skipped_files") or 0)
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        if result.get("truncated"):
+            parts.append("results truncated")
+        return "Search note: " + ", ".join(parts) + "."
+    if tool == "recursive_find_files":
+        parts = [
+            f"{result.get('count', 0)} match(es)",
+            f"{result.get('visited', 0)} item(s) checked",
+        ]
+        if result.get("truncated"):
+            parts.append("results truncated")
+        return "Search note: " + ", ".join(parts) + "."
+    if tool == "copy_to_clipboard":
+        chars = result.get("chars")
+        if chars is not None:
+            return f"Clipboard updated with {chars} character(s)."
+    if tool in ("browser_screenshot", "window_screenshot", "take_screenshot"):
+        path = result.get("path")
+        if path:
+            return f"Screenshot saved to {path}."
+    return ""
+
+
 def _build_summary(actions: list[PlannedAction]) -> str:
     move_count = sum(1 for a in actions if a.tool_name in ("move_file", "rename_file"))
     folder_count = sum(1 for a in actions if a.tool_name == "create_folder")
@@ -649,6 +805,9 @@ def _process_tool_calls(
             sink.progress(f"  ↳ {label}")
             res = _dispatch_with_activity(sink, tc.name, tc.arguments, label)
             messages.append(_tool_result_message(tc.id, res))
+            note = _tool_result_note(tc.name, res)
+            if note:
+                sink.progress(f"  {note}")
             if res.get("ok") is False and not res.get("blocked"):
                 log_event("tool_error", {"tool": tc.name, "error": res.get("error")}, phase="error")
             i += 1
@@ -674,6 +833,7 @@ def _process_tool_calls(
             j += 1
 
         card = build_approval_card(block)
+        sink.info(_approval_reason(card))
         sink.plan(card)
 
         answer = sink.prompt_confirmation(
@@ -697,6 +857,9 @@ def _process_tool_calls(
                     executed += 1
                     if is_verbose():
                         sink.progress(f"  Done: {b.name}")
+                    note = _tool_result_note(b.name, res)
+                    if note:
+                        sink.progress(f"  {note}")
             else:
                 res = {"ok": False, "error": "user_declined", "declined": True}
             results[b.id] = res
@@ -732,6 +895,9 @@ def _process_tool_calls(
                         results[b.id] = res
                         if res.get("ok") and not was_ok:
                             executed += 1
+                            note = _tool_result_note(b.name, res)
+                            if note:
+                                sink.progress(f"  {note}")
                         # Update the tool-result message already in history.
                         for msg in reversed(messages):
                             if msg.get("role") == "tool" and msg.get("tool_call_id") == b.id:
@@ -887,13 +1053,17 @@ def _run_turn(
             return
 
         if result.tool_calls:
-            # Show the model's plan/progress text before processing tools
-            if result.content and result.content.strip():
-                sink.assistant(result.content.strip())
-            else:
-                # No text preamble — discard any dangling stream header.
+            # Show a concrete plan before processing tools. If the model is silent
+            # or only says something generic like "sure", replace it with a
+            # deterministic narration derived from the actual tool calls.
+            if _is_generic_tool_preamble(result.content):
                 getattr(sink, "cancel_stream", lambda: None)()
-            _process_tool_calls(messages, result.tool_calls, sink, result.content)
+                assistant_content = _fallback_tool_narration(result.tool_calls)
+                sink.assistant(assistant_content)
+            else:
+                assistant_content = (result.content or "").strip()
+                sink.assistant(assistant_content)
+            _process_tool_calls(messages, result.tool_calls, sink, assistant_content)
             continue
 
         text = (result.content or "").strip()

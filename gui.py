@@ -225,8 +225,16 @@ class GuiSink:
 
 
 class AssistantApp:
+    def _create_root(self) -> tk.Tk:
+        if _DND_AVAILABLE:
+            try:
+                return TkinterDnD.Tk()
+            except tk.TclError:
+                pass
+        return tk.Tk()
+
     def __init__(self) -> None:
-        self.root = TkinterDnD.Tk() if _DND_AVAILABLE else tk.Tk()
+        self.root = self._create_root()
         self.root.title(_APP_TITLE)
         self.root.geometry(f"{_WIN_W}x{_WIN_H}")
         self.root.configure(bg=_BG)

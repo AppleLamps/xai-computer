@@ -9,12 +9,16 @@ from core import (
     PlannedAction,
     _action_label,
     _action_risk,
+    _approval_reason,
     _claims_clipboard_write,
+    _fallback_tool_narration,
     _format_execution_summary,
+    _is_generic_tool_preamble,
     _process_tool_calls,
     _run_turn,
     _requested_clipboard_write,
     _successful_tool_since,
+    _tool_result_note,
     _tool_progress_label,
     build_approval_card,
 )
@@ -137,6 +141,45 @@ class TestToolProgressLabel:
         assert "file contents" in _tool_progress_label("search_file_contents", {"path": "/x"})
 
 
+class TestToolNarration:
+    def test_generic_preamble_detection(self) -> None:
+        assert _is_generic_tool_preamble("")
+        assert _is_generic_tool_preamble("Sure.")
+        assert _is_generic_tool_preamble("I'll do that")
+        assert not _is_generic_tool_preamble("I'll search bounded text files and report snippets.")
+
+    def test_fallback_narration_mentions_limits(self) -> None:
+        text = _fallback_tool_narration([
+            ToolCallSpec(
+                id="s1",
+                name="search_file_contents",
+                arguments={"path": "C:/Users/lucas/Desktop", "query": "password"},
+            )
+        ])
+        assert "I’ll search bounded text files" in text
+        assert "skipping binary or oversized files" in text
+        assert "read-only" in text
+
+    def test_fallback_narration_mentions_approval_for_mutating(self) -> None:
+        text = _fallback_tool_narration([
+            ToolCallSpec(id="c1", name="copy_file", arguments={"source": "a", "destination": "b"})
+        ])
+        assert "copy a to b" in text
+        assert "approval" in text
+
+    def test_approval_reason_explains_sensitive_reads(self) -> None:
+        card = build_approval_card([ToolCallSpec(id="c1", name="read_clipboard", arguments={})])
+        assert "may expose private" in _approval_reason(card)
+
+    def test_result_notes_include_truncation_and_skips(self) -> None:
+        note = _tool_result_note(
+            "search_file_contents",
+            {"ok": True, "count": 100, "scanned_files": 20, "skipped_files": 3, "truncated": True},
+        )
+        assert "3 skipped" in note
+        assert "truncated" in note
+
+
 class TestExecutionSummary:
     def test_failed_action_summary_is_plain_and_specific(self) -> None:
         block = [ToolCallSpec(id="c1", name="run_command", arguments={"command": "bad"})]
@@ -208,6 +251,23 @@ class TestProcessToolCallsConversation:
         label = sink.progress.call_args[0][0]
         assert "Listing" in label
         assert "/test" in label
+
+    @patch("core.dispatch_tool", return_value={
+        "ok": True,
+        "count": 100,
+        "scanned_files": 25,
+        "skipped_files": 4,
+        "truncated": True,
+    })
+    def test_readonly_tool_shows_result_note(self, mock_dispatch: MagicMock) -> None:
+        sink = self._make_sink()
+        messages: list = []
+        tool_calls = [
+            ToolCallSpec(id="c1", name="search_file_contents", arguments={"path": "/test", "query": "x"}),
+        ]
+        _process_tool_calls(messages, tool_calls, sink)
+        assert sink.progress.call_count == 2
+        assert "results truncated" in sink.progress.call_args_list[-1].args[0]
 
     @patch("core.dispatch_tool", return_value={"ok": True, "files": []})
     def test_multiple_readonly_tools_show_progress(self, mock_dispatch: MagicMock) -> None:
@@ -283,6 +343,8 @@ class TestProcessToolCallsConversation:
         ]
         _process_tool_calls(messages, tool_calls, sink)
         assert sink.plan.call_count == 2
+        approval_notes = [c.args[0] for c in sink.info.call_args_list if "I need your approval" in c.args[0]]
+        assert len(approval_notes) == 2
 
     @patch("core.dispatch_tool", return_value={"ok": True})
     def test_sensitive_new_tools_request_approval(self, mock_dispatch: MagicMock) -> None:
@@ -297,6 +359,7 @@ class TestProcessToolCallsConversation:
         card = sink.plan.call_args[0][0]
         assert isinstance(card, ApprovalCard)
         assert card.action_class == "sensitive_read"
+        assert any("may expose private" in c.args[0] for c in sink.info.call_args_list)
 
     @patch("core.dispatch_tool", return_value={"ok": True})
     def test_copy_to_clipboard_does_not_request_approval(self, mock_dispatch: MagicMock) -> None:
@@ -497,6 +560,101 @@ class TestRunTurnClipboardGuard:
             "Asking the assistant to perform the clipboard step now."
         )
         sink.assistant.assert_called_with("Done.")
+
+
+class TestRunTurnNarration:
+    def _make_sink(self) -> MagicMock:
+        sink = MagicMock()
+        sink.info = MagicMock()
+        sink.error = MagicMock()
+        sink.assistant = MagicMock()
+        sink.plan = MagicMock()
+        sink.progress = MagicMock()
+        sink.prompt_confirmation = MagicMock(return_value="yes")
+        sink.cancel_stream = MagicMock()
+        return sink
+
+    @patch("core.dispatch_tool", return_value={"ok": True, "matches": []})
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=3)
+    @patch("core._chat_with_optional_web_tools")
+    def test_generic_tool_preamble_is_replaced_with_specific_narration(
+        self,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+        mock_dispatch: MagicMock,
+    ) -> None:
+        mock_chat.side_effect = [
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Sure.",
+                tool_calls=[
+                    ToolCallSpec(
+                        id="s1",
+                        name="search_file_contents",
+                        arguments={"path": "/tmp", "query": "password"},
+                    )
+                ],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="No matches found.",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+        sink = self._make_sink()
+        messages: list = []
+
+        _run_turn(messages, "Search for password", sink)
+
+        first_assistant = sink.assistant.call_args_list[0].args[0]
+        assert "I’ll search bounded text files" in first_assistant
+        assert "Sure" not in first_assistant
+        sink.cancel_stream.assert_called()
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=3)
+    @patch("core._chat_with_optional_web_tools")
+    def test_specific_model_preamble_is_preserved(
+        self,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+        mock_dispatch: MagicMock,
+    ) -> None:
+        preamble = "I’ll list the folder contents first, then report the visible files."
+        mock_chat.side_effect = [
+            ChatCompletionResult(
+                message_role="assistant",
+                content=preamble,
+                tool_calls=[ToolCallSpec(id="l1", name="list_directory", arguments={"path": "/tmp"})],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Done.",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+        sink = self._make_sink()
+        messages: list = []
+
+        _run_turn(messages, "List files", sink)
+
+        assert sink.assistant.call_args_list[0].args[0] == preamble
 
 
 # ---------------------------------------------------------------------------

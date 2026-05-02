@@ -2,12 +2,14 @@
 
 ## Project Overview
 
-`xai-computer` is a local Windows desktop assistant that uses xAI Grok for reasoning and vetted Python functions for execution. It has both terminal and Tkinter GUI frontends, a shared orchestration layer, approval-gated mutations, undo support, structured logging, browser/desktop/process automation, and a deterministic shell safety gate. Treat safety behavior as product-critical.
+`xai-computer` is a local Windows desktop assistant that uses xAI Grok for reasoning and vetted Python functions for execution. It has terminal and browser-based frontends, a legacy Tkinter GUI, a shared orchestration layer, approval-gated mutations, undo support, structured logging, browser/desktop/process automation, and a deterministic shell safety gate. Treat safety behavior as product-critical.
 
 ## Architecture Map
 
 - `app.py` launches the CLI; `cli.py` owns terminal I/O, slash commands, and CLI approval rendering.
-- `gui.py` launches the Tkinter app and implements the GUI sink for streaming, approvals, retries, history, and session state.
+- `web_server.py` is the recommended local UI backend. It exposes HTTP endpoints, in-memory turn events, approval handoff, settings, undo, and static serving for the TypeScript browser UI.
+- `web/` contains the Vite React TypeScript frontend. Keep it as a UI client only; local filesystem/process authority must stay in Python.
+- `gui.py` launches the legacy Tkinter app and implements the GUI sink for streaming, approvals, retries, history, and session state.
 - `core.py` is the main turn loop. It calls the xAI client, handles tool calls, batches mutating actions into `ApprovalCard`s, dispatches tools, and rolls results back into the conversation.
 - `xai_client.py` is the minimal HTTPS chat-completions client; `xai_structured.py` uses the xAI SDK only for optional structured UI enrichment.
 - `schemas.py` contains the system prompt, model-facing tool JSON schemas, and `MUTATING_TOOL_NAMES`. Keep schemas and dispatch behavior in sync.
@@ -24,6 +26,8 @@ Use PowerShell from the repo root unless a task says otherwise.
 pip install -r requirements.txt
 playwright install chromium
 python app.py
+python web_server.py --open
+cd web; npm install; npm run build; cd ..
 python gui.py
 python -m pytest -q
 ```
@@ -38,13 +42,14 @@ Install `pytest` separately if needed; it is listed as an optional development d
 - Preserve allowed-root validation in `safety.py`. Read-only and mutating filesystem tools should resolve paths, reject traversal, reject protected system locations, and stay inside configured roots.
 - Preserve dry-run and undo behavior for mutating filesystem operations. New reversible mutations should record undo entries when not in dry-run mode.
 - Keep browser, desktop, and process automation explicit and bounded. Dangerous hotkeys and high-risk interactions should remain blocked or approval-gated.
-- Do not commit or depend on runtime artifacts: `.env`, `logs/`, `state/`, `.pytest_cache/`, `__pycache__/`, virtualenvs, and generated download/session files.
+- Do not commit or depend on runtime artifacts: `.env`, `logs/`, `state/`, `.pytest_cache/`, `__pycache__/`, virtualenvs, `web/node_modules/`, `web/dist/`, and generated download/session files.
 
 ## Testing Guidance
 
 - Run focused tests for the modules you touch, then run `python -m pytest -q` when practical.
 - Add or update tests when changing behavior in `core.py`, `schemas.py`, `tools.py`, `safety.py`, `shell_guard.py`, `undo.py`, or any frontend approval/session flow.
-- For GUI changes, prefer tests around state and rendering helpers where possible, and manually launch `python gui.py` for interaction checks when the environment supports Tk.
+- For web UI changes, run `cd web; npm run build; cd ..` and verify the local UI against `python web_server.py`.
+- For legacy GUI changes, prefer tests around state and rendering helpers where possible, and manually launch `python gui.py` for interaction checks when the environment supports Tk.
 - For browser automation changes, account for Playwright setup and keep downloads isolated under `state/browser_downloads/`.
 
 ## Code Style

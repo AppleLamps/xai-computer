@@ -1,6 +1,6 @@
 # xai-computer
 
-A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. You chat in a terminal; Grok decides which tools to call; the app runs them locally after you approve. There is no shell execution of model-generated code, no file deletion, and no unconfirmed mutations.
+A local Windows desktop assistant that uses **xAI Grok** as the reasoning layer and **vetted Python functions** as the execution layer. You can use it from the CLI or the local browser UI; Grok decides which tools to call; the app runs them locally after you approve. There is no shell execution of model-generated code, no permanent delete tool, and no unconfirmed mutations.
 
 ## What It Can Do
 
@@ -67,7 +67,7 @@ The assistant enforces multiple safety layers:
 User input
     |
     v
-  cli.py  ── slash commands handled locally (never sent to model)
+  cli.py / web_server.py ── local UI surfaces and approval handoff
     |
     v
   core.py ── builds messages, calls xAI API, processes tool calls
@@ -104,7 +104,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details on each module.
 
 ```
 app.py                CLI entry point
-gui.py                GUI entry point (Tkinter)
+web_server.py         Local HTTP API/static server for the browser UI
+web/                  Vite React TypeScript frontend for the browser UI
+gui.py                Legacy GUI entry point (Tkinter)
 cli.py                Terminal I/O, slash commands, approval rendering
 core.py               Conversation loop, tool dispatch, ApprovalCard
 tools.py              Filesystem, analysis, shell, and browser-open tools
@@ -134,6 +136,7 @@ docs/                 Architecture and reference documentation
 
 - Windows 10 or later
 - Python 3.11 or later
+- Node.js 20 or later for the browser UI build/dev server
 - An xAI API key from [console.x.ai](https://console.x.ai/)
 
 **Runtime dependencies** (installed via `pip install -r requirements.txt`):
@@ -181,7 +184,31 @@ Start the assistant (CLI):
 python app.py
 ```
 
-Or launch the desktop GUI:
+Or launch the browser UI. In one terminal:
+
+```powershell
+python web_server.py --open
+```
+
+For frontend development, use a second terminal:
+
+```powershell
+cd web
+npm install
+npm run dev
+```
+
+For production-style local serving from `python web_server.py`, build the frontend once:
+
+```powershell
+cd web
+npm install
+npm run build
+cd ..
+python web_server.py --open
+```
+
+The old Tkinter GUI is still present for now, but the browser UI is the recommended interface:
 
 ```powershell
 python gui.py

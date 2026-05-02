@@ -149,21 +149,43 @@ def list_directory(path: str) -> dict[str, Any]:
     set_last_working_folder(root)
     try:
         entries: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+        folders: list[dict[str, Any]] = []
         for child in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
             try:
                 stat = child.stat()
             except OSError:
                 continue
-            entries.append(
-                {
-                    "name": child.name,
-                    "is_dir": child.is_dir(),
-                    "is_file": child.is_file(),
-                    "size": stat.st_size if child.is_file() else None,
-                }
-            )
+            is_dir = child.is_dir()
+            is_file = child.is_file()
+            entry = {
+                "name": child.name,
+                "path": str(child),
+                "is_dir": is_dir,
+                "is_file": is_file,
+                "size": stat.st_size if is_file else None,
+                "size_display": _format_size(stat.st_size) if is_file else None,
+            }
+            entries.append(entry)
+            if is_file:
+                files.append(entry)
+            elif is_dir:
+                folders.append(entry)
         log_event("list_directory", {"path": str(root), "count": len(entries)}, phase="executed")
-        return {"ok": True, "path": str(root), "entries": entries}
+        return {
+            "ok": True,
+            "path": str(root),
+            "entries": entries,
+            "files": files,
+            "folders": folders,
+            "entry_count": len(entries),
+            "file_count": len(files),
+            "folder_count": len(folders),
+            "summary": (
+                f"Directory contains {len(folders)} folder(s) and {len(files)} file(s); "
+                f"{len(entries)} total visible entr{'y' if len(entries) == 1 else 'ies'}."
+            ),
+        }
     except OSError as e:
         return {"ok": False, "error": str(e)}
 
@@ -405,12 +427,26 @@ def recent_files(path: str, limit: int = 15) -> dict[str, Any]:
             "name": f.name,
             "path": str(f),
             "modified": datetime.fromtimestamp(mt, tz=timezone.utc).isoformat()[:19],
+            "modified_utc": datetime.fromtimestamp(mt, tz=timezone.utc).isoformat(),
             "size": _format_size(sz),
+            "size_bytes": sz,
         }
         for f, mt, sz in files[:limit]
     ]
     log_event("recent_files", {"path": str(root), "limit": limit}, phase="executed")
-    return {"ok": True, "path": str(root), "files": top, "count": len(top)}
+    return {
+        "ok": True,
+        "path": str(root),
+        "files": top,
+        "count": len(top),
+        "returned_count": len(top),
+        "total_file_count": len(files),
+        "limit": limit,
+        "sorted_by": "modified_time_desc",
+        "summary": (
+            f"Returned {len(top)} of {len(files)} file(s), sorted by modified time descending."
+        ),
+    }
 
 
 def directory_tree(path: str, depth: int = 2) -> dict[str, Any]:

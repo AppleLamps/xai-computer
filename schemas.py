@@ -33,6 +33,11 @@ is blocked, explain what happened and suggest a safe alternative.
 and say you could not search.
 - If a result contains dry_run=true, inform the user that dry-run mode is on and no \
 changes were actually made.
+- When a tool result includes explicit count fields such as file_count, folder_count, \
+entry_count, returned_count, or total_file_count, use those exact values. Do not infer \
+counts from a requested limit or from a mixed entries list.
+- Prefer separated tool result arrays such as files and folders over mixed entries when \
+reporting directory contents.
 - When organizing or editing files, prefer preview/read steps first and explain the plan clearly."""
 
 MUTATING_TOOL_NAMES = frozenset(

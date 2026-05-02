@@ -424,7 +424,10 @@ def _runtime_system_prompt() -> str:
         "- Prefer dedicated read-only tools such as list_directory, recent_files, "
         "largest_files, search_files, and directory_tree for inspection tasks.\n"
         "- Do not use run_command just to discover common paths, list files, or sort "
-        "recent files when a dedicated read-only tool can do the job."
+        "recent files when a dedicated read-only tool can do the job.\n"
+        "- When reporting directory contents, use list_directory.files and "
+        "list_directory.folders plus their explicit file_count/folder_count fields. "
+        "Do not count mixed entries yourself unless no count field is available."
     )
 
 

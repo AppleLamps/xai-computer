@@ -118,6 +118,13 @@ class TestListDirectory:
         names = {e["name"] for e in result["entries"]}
         assert "photo.png" in names
         assert "notes.txt" in names
+        assert result["entry_count"] == len(result["entries"])
+        assert result["file_count"] == len(result["files"])
+        assert result["folder_count"] == len(result["folders"])
+        assert result["file_count"] + result["folder_count"] == result["entry_count"]
+        assert all(e["is_file"] for e in result["files"])
+        assert all(e["is_dir"] for e in result["folders"])
+        assert "folder" in result["summary"]
 
     def test_rejects_outside_roots(self, tmp_path: Path) -> None:
         outside = tmp_path / "nope"
@@ -191,6 +198,17 @@ class TestRecentFiles:
         result = recent_files(str(sample_files))
         assert result["ok"] is True
         assert len(result["files"]) > 0
+        assert result["returned_count"] == len(result["files"])
+        assert result["count"] == result["returned_count"]
+        assert result["total_file_count"] >= result["returned_count"]
+        assert result["sorted_by"] == "modified_time_desc"
+
+    def test_limit_is_distinct_from_total_count(self, sample_files: Path) -> None:
+        result = recent_files(str(sample_files), limit=2)
+        assert result["ok"] is True
+        assert result["limit"] == 2
+        assert result["returned_count"] == 2
+        assert result["total_file_count"] >= result["returned_count"]
 
 
 class TestDirectoryTree:

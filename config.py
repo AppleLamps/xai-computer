@@ -23,10 +23,16 @@ _load_project_dotenv()
 # Available models
 # ---------------------------------------------------------------------------
 
+DEFAULT_MODEL = "grok-4.3-latest"
+
 MODELS: dict[str, str] = {
-    "fast": "grok-4-1-fast-reasoning",
-    "quality": "grok-4.20-0309-reasoning",
-    "code": "grok-code-fast-1",
+    DEFAULT_MODEL: DEFAULT_MODEL,
+}
+
+MODEL_ALIASES: dict[str, str] = {
+    "fast": DEFAULT_MODEL,
+    "quality": DEFAULT_MODEL,
+    "code": DEFAULT_MODEL,
 }
 
 # ---------------------------------------------------------------------------
@@ -37,27 +43,41 @@ _runtime_model: str | None = None
 _user_set_model: bool = False  # True if user explicitly chose a model via /model
 _dry_run: bool = False
 _verbose: bool = True  # True = verbose (default), False = concise
+_auto_switch_models: bool = True
 _last_working_folder: Path | None = None
 
 
-def set_dry_run(enabled: bool) -> None:
+def set_dry_run(enabled: bool, *, persist: bool = False) -> None:
     global _dry_run
     _dry_run = enabled
+    if persist:
+        _set_web_setting("dry_run", enabled)
 
 
 def is_dry_run() -> bool:
     return _dry_run
 
 
-def set_runtime_model(model: str, *, user_initiated: bool = True) -> None:
+def set_runtime_model(model: str, *, user_initiated: bool = True, persist: bool = False) -> None:
     global _runtime_model, _user_set_model
-    _runtime_model = model
+    normalized_model = normalize_model_id(model)
+    _runtime_model = normalized_model
     if user_initiated:
         _user_set_model = True
+    if persist:
+        _set_web_setting("model", normalized_model)
 
 
 def get_runtime_model_override() -> str | None:
     return _runtime_model
+
+
+def normalize_model_id(model: str) -> str:
+    """Map old local Grok model settings to the single supported model."""
+    raw = model.strip()
+    if raw.startswith("grok-") and raw != DEFAULT_MODEL:
+        return DEFAULT_MODEL
+    return raw
 
 
 def user_has_set_model() -> bool:
@@ -65,13 +85,26 @@ def user_has_set_model() -> bool:
     return _user_set_model
 
 
-def set_verbose(enabled: bool) -> None:
+def set_verbose(enabled: bool, *, persist: bool = False) -> None:
     global _verbose
     _verbose = enabled
+    if persist:
+        _set_web_setting("verbose", enabled)
 
 
 def is_verbose() -> bool:
     return _verbose
+
+
+def set_auto_switch_models(enabled: bool, *, persist: bool = False) -> None:
+    global _auto_switch_models
+    _auto_switch_models = enabled
+    if persist:
+        _set_web_setting("auto_switch_models", enabled)
+
+
+def is_auto_switch_models() -> bool:
+    return _auto_switch_models
 
 
 def set_last_working_folder(path: Path) -> None:
@@ -157,6 +190,35 @@ def _save_settings(data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _set_web_setting(key: str, value: object) -> None:
+    data = _load_settings()
+    web = data.get("web")
+    if not isinstance(web, dict):
+        web = {}
+    web[key] = value
+    data["web"] = web
+    _save_settings(data)
+
+
+def get_web_settings() -> dict:
+    settings = _load_settings().get("web")
+    return dict(settings) if isinstance(settings, dict) else {}
+
+
+def load_persisted_web_settings() -> None:
+    """Apply persisted non-sensitive web settings to runtime state."""
+    settings = get_web_settings()
+    model = settings.get("model")
+    if isinstance(model, str) and model.strip():
+        set_runtime_model(model.strip(), user_initiated=False)
+    if isinstance(settings.get("dry_run"), bool):
+        set_dry_run(bool(settings["dry_run"]))
+    if isinstance(settings.get("verbose"), bool):
+        set_verbose(bool(settings["verbose"]))
+    if isinstance(settings.get("auto_switch_models"), bool):
+        set_auto_switch_models(bool(settings["auto_switch_models"]))
+
+
 def get_allowed_roots() -> list[Path]:
     """
     Paths under which mutating file operations are permitted.
@@ -213,22 +275,22 @@ def get_xai_model() -> str:
     override = get_runtime_model_override()
     if override:
         return override
-    return os.environ.get("XAI_MODEL", MODELS["fast"])
+    return normalize_model_id(os.environ.get("XAI_MODEL", DEFAULT_MODEL))
 
 
 def get_coding_model() -> str | None:
-    """Return the coding model ID from XAI_CODING_MODEL, or None if not configured."""
+    """Return the optional coding model ID, normalized away from retired IDs."""
     raw = os.environ.get("XAI_CODING_MODEL", "").strip()
-    return raw if raw else None
+    return normalize_model_id(raw) if raw else None
 
 
 def get_max_tool_loops() -> int:
-    raw = os.environ.get("XAI_MAX_TOOL_LOOPS", "12")
+    raw = os.environ.get("XAI_MAX_TOOL_LOOPS", "24")
     try:
         val = int(raw)
         return max(1, min(val, 50))
     except ValueError:
-        return 12
+        return 24
 
 
 # ---------------------------------------------------------------------------

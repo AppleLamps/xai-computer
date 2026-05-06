@@ -22,6 +22,7 @@ from config import (
     get_max_tool_loops,
     get_xai_api_key,
     get_xai_model,
+    is_auto_switch_models,
     is_dry_run,
     is_verbose,
     set_runtime_model,
@@ -616,7 +617,7 @@ _WEB_SEARCH_ATTACHED: bool | None = None
 
 
 def _runtime_system_prompt() -> str:
-    roots = "\n".join(f"- {p}" for p in get_allowed_roots())
+    roots = "\n".join(f"  - {p}" for p in get_allowed_roots())
     return (
         f"{SYSTEM_PROMPT}\n\n"
         "Runtime context:\n"
@@ -635,7 +636,10 @@ def _runtime_system_prompt() -> str:
         "tools for visual or clipboard context instead of shell workarounds.\n"
         "- When reporting directory contents, use list_directory.files and "
         "list_directory.folders plus their explicit file_count/folder_count fields. "
-        "Do not count mixed entries yourself unless no count field is available."
+        "Do not count mixed entries yourself unless no count field is available.\n"
+        "- When organizing or editing files, preview first, explain the proposed plan, "
+        "and then use dedicated mutation tools after confirmation when the action is "
+        "broad, destructive, or ambiguous."
     )
 
 
@@ -687,6 +691,37 @@ def _claims_clipboard_write(text: str) -> bool:
         or "to your clipboard" in lower
         or "on your clipboard" in lower
     )
+
+
+def _ask_to_continue_tool_loop(sink: OutputSink, max_steps: int, chunks_completed: int) -> bool:
+    """Ask the user whether to allow another bounded block of tool/model loops."""
+    card = ApprovalCard(
+        actions=[
+            PlannedAction(
+                index=1,
+                tool_name="continue_tool_loop",
+                arguments={"additional_round_trips": max_steps, "chunks_completed": chunks_completed},
+                action_class="continuation",
+                label=f"CONTINUE for up to {max_steps} more model/tool round-trip(s)",
+                risk="low",
+            )
+        ],
+        action_class="continuation",
+        summary=f"Continue for up to {max_steps} more model/tool round-trip(s)",
+    )
+    sink.info(
+        f"I reached the configured tool loop limit ({max_steps} round-trip(s)). "
+        "I can continue in another bounded block if you approve."
+    )
+    sink.plan(card)
+    answer = sink.prompt_confirmation("Continue? (yes / cancel): ")
+    approved = is_affirmative_confirmation(answer)
+    log_event(
+        "tool_loop_continue_prompt",
+        {"approved": approved, "max_steps": max_steps, "chunks_completed": chunks_completed},
+        phase="confirmed" if approved else "skipped",
+    )
+    return approved
 
 
 def _successful_tool_since(messages: list[dict[str, Any]], start: int, tool_name: str) -> bool:
@@ -793,17 +828,41 @@ def _process_tool_calls(
     def _is_retryable(call: ToolCallSpec) -> bool:
         return _action_class(call.name) == "filesystem_write"
 
+    stop_event = getattr(sink, "stop_event", None)
+    if not isinstance(stop_event, threading.Event):
+        stop_event = None
+
+    def _stopped() -> bool:
+        return bool(stop_event and stop_event.is_set())
+
+    def _emit_tool_result(name: str, result: dict[str, Any]) -> None:
+        cb = getattr(sink, "tool_result", None)
+        if cb:
+            cb(name, result)
+
+    def _append_canceled_from(start: int) -> None:
+        for remaining in tool_calls[start:]:
+            messages.append(_tool_result_message(
+                remaining.id,
+                {"ok": False, "error": "stopped_by_user", "stopped": True},
+            ))
+        log_event("tool_processing_stopped", {"remaining": max(0, len(tool_calls) - start)}, phase="stopped")
+
     tool_calls = _ensure_tool_call_ids(tool_calls)
     messages.append(_build_assistant_tool_message(tool_calls, assistant_content))
 
     i = 0
     n = len(tool_calls)
     while i < n:
+        if _stopped():
+            _append_canceled_from(i)
+            return
         tc = tool_calls[i]
         if tc.name not in MUTATING_TOOL_NAMES:
             label = _tool_progress_label(tc.name, tc.arguments)
             sink.progress(f"  ↳ {label}")
             res = _dispatch_with_activity(sink, tc.name, tc.arguments, label)
+            _emit_tool_result(tc.name, res)
             messages.append(_tool_result_message(tc.id, res))
             note = _tool_result_note(tc.name, res)
             if note:
@@ -816,6 +875,7 @@ def _process_tool_calls(
         blocked, blocked_result = _preflight_mutating_tool(tc)
         if blocked:
             res = blocked_result if blocked_result is not None else dispatch_tool(tc.name, tc.arguments)
+            _emit_tool_result(tc.name, res)
             messages.append(_tool_result_message(tc.id, res))
             i += 1
             continue
@@ -839,6 +899,9 @@ def _process_tool_calls(
         answer = sink.prompt_confirmation(
             'Approve? (yes / cancel): '
         )
+        if _stopped():
+            _append_canceled_from(i)
+            return
         approved = is_affirmative_confirmation(answer)
         log_event(
             "user_confirmation",
@@ -848,11 +911,19 @@ def _process_tool_calls(
 
         executed = 0
         results: dict[str, dict[str, Any]] = {}
-        for b in block:
+        for block_index, b in enumerate(block):
+            if _stopped():
+                for remaining in block[block_index:]:
+                    res = {"ok": False, "error": "stopped_by_user", "stopped": True}
+                    results[remaining.id] = res
+                    messages.append(_tool_result_message(remaining.id, res))
+                _append_canceled_from(j)
+                return
             if approved:
                 res = _dispatch_with_activity(
                     sink, b.name, b.arguments, _tool_progress_label(b.name, b.arguments)
                 )
+                _emit_tool_result(b.name, res)
                 if res.get("ok"):
                     executed += 1
                     if is_verbose():
@@ -888,9 +959,12 @@ def _process_tool_calls(
                 if is_affirmative_confirmation(retry_answer):
                     log_event("retry_batch", {"count": len(failed_block)}, phase="retry")
                     for b in failed_block:
+                        if _stopped():
+                            return
                         res = _dispatch_with_activity(
                             sink, b.name, b.arguments, _tool_progress_label(b.name, b.arguments)
                         )
+                        _emit_tool_result(b.name, res)
                         was_ok = results[b.id].get("ok", False)
                         results[b.id] = res
                         if res.get("ok") and not was_ok:
@@ -986,6 +1060,8 @@ def handle_user_turn(
 
     if (
         coding_model
+        and coding_model != get_xai_model()
+        and is_auto_switch_models()
         and not user_has_set_model()
         and _detect_coding_intent(user_text)
     ):
@@ -1026,7 +1102,24 @@ def _run_turn(
 
     max_steps = get_max_tool_loops()
     clipboard_retry_requested = False
-    for _ in range(max_steps):
+    steps_since_continue = 0
+    continuation_chunks = 0
+    while True:
+        if stop_event and stop_event.is_set():
+            getattr(sink, "cancel_stream", lambda: None)()
+            return
+        if steps_since_continue >= max_steps:
+            continuation_chunks += 1
+            if not _ask_to_continue_tool_loop(sink, max_steps, continuation_chunks):
+                text = (
+                    f"I reached the configured tool loop limit ({max_steps} round-trip(s)) "
+                    "and stopped because continuing was not approved."
+                )
+                sink.assistant(text)
+                messages.append({"role": "assistant", "content": text})
+                log_event("tool_loop_limit_declined", {"max_steps": max_steps}, phase="skipped")
+                return
+            steps_since_continue = 0
         # Signal to the sink that a new LLM response is starting.
         getattr(sink, "start_stream", lambda: None)()
         try:
@@ -1034,6 +1127,7 @@ def _run_turn(
                 api_key, model, messages, tools, sink,
                 on_delta=on_delta, stop_event=stop_event,
             )
+            steps_since_continue += 1
         except RuntimeError as e:
             getattr(sink, "cancel_stream", lambda: None)()
             sink.error(f"[error] {e}")
@@ -1103,10 +1197,6 @@ def _run_turn(
             sink.assistant("(empty response)")
         log_event("assistant_done", {"has_content": bool(text)})
         return
-    else:
-        sink.error("[error] Tool loop limit reached; stopping this turn.")
-        log_event("tool_loop_limit", {}, phase="error")
-        messages[:] = original_messages
 
 
 def get_startup_info() -> dict[str, Any]:
@@ -1117,6 +1207,7 @@ def get_startup_info() -> dict[str, Any]:
         "desktop": str(get_default_desktop_path()),
         "allowed_roots": [str(p) for p in get_allowed_roots()],
         "dry_run": is_dry_run(),
+        "auto_switch_models": is_auto_switch_models(),
         "web_search": web_search_enabled(),
         "max_tool_loops": get_max_tool_loops(),
         "verbose": is_verbose(),

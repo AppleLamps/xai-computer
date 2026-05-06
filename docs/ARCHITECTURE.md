@@ -21,10 +21,11 @@ Owns all terminal I/O. Implements `TerminalSink` (the `OutputSink` protocol from
 The conversation engine. Manages the message list, calls the xAI API, and processes tool calls. Contains the `OutputSink` protocol that both CLI and GUI implement.
 
 Key types:
+
 - `PlannedAction` — one step in a pending plan (tool name, arguments, label, risk level)
 - `ApprovalCard` — everything the UI needs to render an approval prompt (actions, scope, risk, dry-run flag)
 
-When the model returns tool calls, `core.py` splits them into read-only (executed immediately) and mutating (batched into an `ApprovalCard`, shown to user, executed only after approval).
+When the model returns tool calls, `core.py` splits them into read-only (executed immediately) and mutating (batched into an `ApprovalCard`, shown to the user, executed only after approval). The web UI has a session-scoped BYPASS ALL option that auto-approves approval cards, but it does not bypass deterministic shell blocking, path validation, dry-run behavior, or undo logging.
 
 ### `xai_client.py` — API client (tool-calling loop)
 
@@ -53,6 +54,7 @@ Deterministic classifier for shell commands. Every proposed command is classifie
 ### `safety.py` — Path validation
 
 Centralizes all path safety logic:
+
 - `require_allowed_path()` — resolve, check traversal, check blocked locations, check allowed roots
 - `is_affirmative_confirmation()` — strict regex matching for approval text
 - `is_hidden_name()` / `is_system_or_protected_name()` — skip protected files during organization
@@ -71,7 +73,7 @@ Records reversible actions in `state/undo_history.jsonl`. Each record stores the
 
 ## Request Flow
 
-```
+```text
 1. User types natural language      "organize my desktop by type"
        |
 2. cli.py routes to core.py         (slash commands handled locally instead)

@@ -36,7 +36,7 @@ Install `pytest` separately if needed; it is listed as an optional development d
 
 ## Safety Rules For Agents
 
-- Never bypass approval cards for mutating actions. Filesystem writes, shell commands, process control, browser control, and desktop input must remain approval-gated through `core.py`.
+- Never bypass approval cards in app code except through the explicit web **BYPASS ALL** setting. That setting is session-scoped, may auto-approve approval cards, and must never bypass deterministic hard blocks, allowed-root validation, dry-run behavior, undo logging, or secret redaction.
 - Do not loosen `shell_guard.py` casually. The shell classifier is deterministic by design; blocked commands, structural blocking, secret redaction, and output truncation are safety boundaries.
 - Do not use arbitrary shell execution in app code. `run_command` must go through `shell_guard.py`, `subprocess.run(..., shell=False)`, bounded timeouts, validated working directories, and redacted/truncated output.
 - Preserve allowed-root validation in `safety.py`. Read-only and mutating filesystem tools should resolve paths, reject traversal, reject protected system locations, and stay inside configured roots.

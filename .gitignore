@@ -1,13 +1,33 @@
-__pycache__/
-*.pyc
-.venv/
+# Secrets and local environment
 .env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+pip-wheel-metadata/
+
+# Runtime state and logs
 logs/
 state/
-.pytest_cache/
-*.egg-info/
+*.log
 
-# Frontend build and package-manager artifacts
+# Frontend dependencies, builds, and package-manager artifacts
 web/node_modules/
 web/dist/
 web/.vite/
@@ -15,3 +35,14 @@ web/tsconfig.tsbuildinfo
 web/npm-debug.log*
 web/yarn-debug.log*
 web/yarn-error.log*
+web/pnpm-debug.log*
+web/coverage/
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.tmp
+*.bak

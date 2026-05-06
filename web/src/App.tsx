@@ -1,35 +1,36 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle,
-  Check,
-  ClipboardCheck,
-  FolderOpen,
-  Loader2,
-  Monitor,
-  RotateCcw,
-  Send,
-  Shield,
-  Sparkles,
-  X
-} from "lucide-react";
-import {
   ApprovalCard,
   WebEvent,
   answerApproval,
   createSession,
   getEvents,
+  getSession,
   getStartup,
+  openLogsFolder,
   sendMessage,
+  stopSession,
   undoLast,
+  updateAllowedRoots,
   updateSettings,
+  type SavedSession,
   type SessionInfo,
   type Startup
 } from "./api";
-
-type TranscriptItem =
-  | { id: string; role: "user" | "assistant" | "info" | "error" | "progress"; text: string; ts?: string }
-  | { id: string; role: "approval"; card: ApprovalCard; ts?: string };
-type ProgressItem = { id: string; role: "progress"; text: string; ts?: string };
+import {
+  ApprovalModal,
+  Artifact,
+  CompactRail,
+  Composer,
+  ControlsDrawer,
+  Drawer,
+  ErrorRecovery,
+  OutputsDrawer,
+  TaskDrawer,
+  Topbar,
+  Transcript,
+  TranscriptItem
+} from "./components";
 
 const quickPrompts = [
   "List what's on my Desktop and tell me the 5 most recently modified files.",
@@ -44,101 +45,58 @@ function textFromEvent(event: WebEvent): TranscriptItem | null {
   if (event.kind === "info") return { id: String(event.id), role: "info", text, ts: event.ts };
   if (event.kind === "error") return { id: String(event.id), role: "error", text, ts: event.ts };
   if (event.kind === "progress") return { id: String(event.id), role: "progress", text, ts: event.ts };
+  if (event.kind === "stopped") return { id: String(event.id), role: "stopped", text: "Stopped by user.", ts: event.ts };
+  if (event.kind === "auto_approved") return { id: String(event.id), role: "auto_approved", text, ts: event.ts };
+  if (event.kind === "tool_result") {
+    const result = event.payload.result;
+    return {
+      id: String(event.id),
+      role: "result",
+      name: String(event.payload.name ?? "tool_result"),
+      result: result && typeof result === "object" ? result as Record<string, unknown> : {},
+      ts: event.ts
+    };
+  }
   if (event.kind === "approval") return { id: String(event.id), role: "approval", card: event.payload.card as ApprovalCard, ts: event.ts };
   return null;
 }
 
-function cls(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
-}
-
-function cleanProgress(text: string): string {
-  return text.replace(/^\s*[↳└\-]+\s*/, "").trim();
-}
-
-function InlineText({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
-  return (
-    <>
-      {parts.map((part, index) => {
-        if (part.startsWith("**") && part.endsWith("**")) {
-          return <strong key={index}>{part.slice(2, -2)}</strong>;
-        }
-        if (part.startsWith("`") && part.endsWith("`")) {
-          return <code key={index}>{part.slice(1, -1)}</code>;
-        }
-        return <span key={index}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-function MarkdownText({ text }: { text: string }) {
-  const lines = text.split(/\r?\n/);
-  return (
-    <div className="markdown-text">
-      {lines.map((line, index) => {
-        const trimmed = line.trim();
-        if (!trimmed) return <div className="md-space" key={index} />;
-        const bullet = trimmed.match(/^[-•]\s+(.*)$/);
-        if (bullet) {
-          return (
-            <div className="md-bullet" key={index}>
-              <span className="md-dot" />
-              <span><InlineText text={bullet[1]} /></span>
-            </div>
-          );
-        }
-        if (/^\d+\.\s+/.test(trimmed)) {
-          const [num, ...rest] = trimmed.split(/\s+/);
-          return (
-            <div className="md-numbered" key={index}>
-              <span>{num}</span>
-              <span><InlineText text={rest.join(" ")} /></span>
-            </div>
-          );
-        }
-        return <p key={index}><InlineText text={trimmed} /></p>;
-      })}
-    </div>
-  );
-}
-
-function ProgressCluster({ items }: { items: ProgressItem[] }) {
-  if (!items.length) return null;
-  const shown = items.slice(-8);
-  const hidden = Math.max(0, items.length - shown.length);
-  return (
-    <div className="progress-cluster">
-      <div className="progress-title">
-        <span className="activity-mark" />
-        <span>Activity</span>
-        {hidden > 0 && <em>{hidden} earlier</em>}
-      </div>
-      <div className="progress-list">
-        {shown.map((item) => (
-          <div className="progress-row" key={item.id}>
-            <span className="progress-node" />
-            <span>{cleanProgress(item.text)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+function artifactFromEvent(event: WebEvent): Artifact | null {
+  const payload = event.kind === "artifact" ? event.payload : event.payload.artifact;
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  return {
+    id: `${event.id}-${String(record.path ?? record.kind ?? "artifact")}`,
+    kind: String(record.kind ?? "artifact"),
+    title: record.title ? String(record.title) : undefined,
+    path: record.path ? String(record.path) : undefined,
+    tool: record.tool ? String(record.tool) : undefined,
+    chars: typeof record.chars === "number" ? record.chars : undefined,
+    preview: record.preview ? String(record.preview) : undefined,
+  };
 }
 
 export function App() {
   const [startup, setStartup] = useState<Startup | null>(null);
   const [models, setModels] = useState<Record<string, string>>({});
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [items, setItems] = useState<TranscriptItem[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [lastEventId, setLastEventId] = useState(0);
   const [input, setInput] = useState("");
+  const [lastPrompt, setLastPrompt] = useState("");
   const [activeApproval, setActiveApproval] = useState<ApprovalCard | null>(null);
   const [status, setStatus] = useState("Connecting to local backend...");
   const [error, setError] = useState<string | null>(null);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
+  const [lastPhase, setLastPhase] = useState("Ready");
   const [sending, setSending] = useState(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [outputsOpen, setOutputsOpen] = useState(false);
+  const [taskOpen, setTaskOpen] = useState(false);
+  const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
+  const [expandedResultIds, setExpandedResultIds] = useState<Set<string>>(new Set());
   const transcriptRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -147,6 +105,7 @@ export function App() {
         setStartup(data.startup);
         setModels(data.models);
         setSession(data.session);
+        setSavedSessions(data.saved_sessions);
         setStatus("Ready");
       })
       .catch((err: Error) => {
@@ -166,12 +125,31 @@ export function App() {
         if (data.events.length) {
           setLastEventId(data.events[data.events.length - 1].id);
           const next = data.events.map(textFromEvent).filter(Boolean) as TranscriptItem[];
+          const newArtifacts = data.events.map(artifactFromEvent).filter(Boolean) as Artifact[];
           setItems((prev) => [...prev, ...next]);
+          if (newArtifacts.length) setArtifacts((prev) => [...prev, ...newArtifacts]);
           for (const event of data.events) {
-            if (event.kind === "approval") setActiveApproval(event.payload.card as ApprovalCard);
-            if (event.kind === "tool_start") setToolActivity(String(event.payload.label ?? event.payload.name ?? ""));
+            if (event.kind === "approval") {
+              setActiveApproval(event.payload.card as ApprovalCard);
+              setLastPhase("Waiting for approval");
+            }
+            if (event.kind === "auto_approved") setLastPhase("Auto-approved");
+            if (event.kind === "phase") setLastPhase(String(event.payload.label ?? event.payload.phase ?? "Working"));
+            if (event.kind === "tool_start") {
+              setToolActivity(String(event.payload.label ?? event.payload.name ?? ""));
+              setLastPhase(String(event.payload.label ?? "Running tool"));
+            }
             if (event.kind === "tool_end") setToolActivity(null);
-            if (event.kind === "done") setSending(false);
+            if (event.kind === "stopped") {
+              setSending(false);
+              setLastPhase("Stopped");
+              setActiveApproval(null);
+            }
+            if (event.kind === "done") {
+              setSending(false);
+              setLastPhase(Boolean(event.payload.canceled) ? "Stopped" : event.payload.error ? "Error" : "Done");
+              setActiveApproval(null);
+            }
           }
         }
         setError(null);
@@ -194,15 +172,26 @@ export function App() {
   const tokenTotal = session?.token_totals?.total_tokens ?? 0;
   const modelLabel = startup?.model ?? "unknown";
   const canSend = Boolean(input.trim()) && !session?.busy && !sending;
-
+  const knownModelValues = Object.values(models);
+  const selectedModelKnown = startup?.model ? knownModelValues.includes(startup.model) : true;
   const groupedItems = useMemo(() => items.filter((item) => item.role !== "approval"), [items]);
 
-  async function submit(event?: FormEvent) {
+  async function refreshStartup(currentSession = session) {
+    const data = await getStartup(currentSession?.id);
+    setStartup(data.startup);
+    setModels(data.models);
+    setSavedSessions(data.saved_sessions);
+    setSession(data.session);
+  }
+
+  async function submit(event?: FormEvent, overrideText?: string) {
     event?.preventDefault();
-    if (!session || !input.trim()) return;
+    const text = (overrideText ?? input).trim();
+    if (!session || !text) return;
     setSending(true);
-    const text = input.trim();
+    setLastPrompt(text);
     setInput("");
+    setLastPhase("Starting");
     try {
       await sendMessage(session.id, text);
     } catch (err) {
@@ -226,22 +215,71 @@ export function App() {
     const data = await createSession();
     setSession(data.session);
     setItems([]);
+    setArtifacts([]);
     setLastEventId(0);
     setActiveApproval(null);
+    setError(null);
+    await refreshStartup(data.session);
+  }
+
+  async function restoreSession(id: string) {
+    const data = await getSession(id);
+    setStartup(data.startup);
+    setSession(data.session);
+    setItems(data.events.map(textFromEvent).filter(Boolean) as TranscriptItem[]);
+    setArtifacts(data.events.map(artifactFromEvent).filter(Boolean) as Artifact[]);
+    setLastEventId(data.session.event_count);
+    setActiveApproval(null);
+    setError(null);
   }
 
   async function setMode(model: string) {
-    const data = await updateSettings({ model });
+    const data = await updateSettings({ session_id: session?.id, model });
     setStartup(data.startup);
   }
 
   async function toggleDryRun() {
-    const data = await updateSettings({ dry_run: !startup?.dry_run });
+    const data = await updateSettings({ session_id: session?.id, dry_run: !startup?.dry_run });
     setStartup(data.startup);
   }
 
   async function toggleVerbose() {
-    const data = await updateSettings({ verbose: !startup?.verbose });
+    const data = await updateSettings({ session_id: session?.id, verbose: !startup?.verbose });
+    setStartup(data.startup);
+  }
+
+  async function toggleBypassApprovals() {
+    const data = await updateSettings({ session_id: session?.id, bypass_approvals: !startup?.bypass_approvals });
+    setStartup(data.startup);
+    if (session) setSession({ ...session, bypass_approvals: Boolean(data.startup.bypass_approvals) });
+  }
+
+  async function toggleModelLock() {
+    const autoSwitchOn = startup?.auto_switch_models ?? true;
+    const data = await updateSettings({ session_id: session?.id, auto_switch_models: !autoSwitchOn });
+    setStartup(data.startup);
+  }
+
+  async function addRoot(path: string) {
+    try {
+      const data = await updateAllowedRoots({ action: "add", path });
+      setStartup(data.startup);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function removeRoot(path: string) {
+    try {
+      const data = await updateAllowedRoots({ action: "remove", path });
+      setStartup(data.startup);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function resetRoots() {
+    const data = await updateAllowedRoots({ action: "reset" });
     setStartup(data.startup);
   }
 
@@ -257,169 +295,136 @@ export function App() {
     }
   }
 
+  async function stop() {
+    if (!session) return;
+    try {
+      await stopSession(session.id);
+      setLastPhase("Stopping");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function retryLastPrompt() {
+    if (lastPrompt) await submit(undefined, lastPrompt);
+  }
+
+  async function switchModelRecovery() {
+    const fallback = models["grok-4.3-latest"] ?? Object.values(models)[0];
+    if (fallback) await setMode(fallback);
+  }
+
+  async function openLogs() {
+    try {
+      await openLogsFolder();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function toggleToolGroup(id: string) {
+    setExpandedToolGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleResult(id: string) {
+    setExpandedResultIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark"><Monitor size={18} /></div>
-          <div>
-            <strong>xai-computer</strong>
-            <span>local computer agent</span>
-          </div>
-        </div>
-        <div className="top-status">
-          <span className={cls("live-dot", session?.busy && "busy")} />
-          <span>{session?.busy ? "Working" : status}</span>
-          <span className="chip">{modelLabel}</span>
-          <span className="chip">{tokenTotal.toLocaleString()} tokens</span>
-        </div>
-      </header>
-
+      <Topbar
+        session={session}
+        status={status}
+        model={modelLabel}
+        tokens={tokenTotal}
+        bypass={Boolean(startup?.bypass_approvals)}
+        dryRun={Boolean(startup?.dry_run)}
+        activity={toolActivity || lastPhase}
+        outputsCount={artifacts.length}
+        onOpenControls={() => setControlsOpen(true)}
+        onOpenOutputs={() => setOutputsOpen(true)}
+        onOpenTask={() => setTaskOpen(true)}
+      />
       <section className="layout">
-        <aside className="sidebar">
-          <section className="side-section">
-            <h2>Workspace</h2>
-            <p className="muted">{startup?.desktop ?? "Loading desktop..."}</p>
-          </section>
-
-          <section className="side-section">
-            <h3>Model</h3>
-            <div className="segmented">
-              {Object.entries(models).map(([key, value]) => (
-                <button key={key} className={cls(startup?.model === value && "selected")} onClick={() => void setMode(value)}>
-                  {key}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="side-section">
-            <h3>Options</h3>
-            <label className="toggle">
-              <input type="checkbox" checked={Boolean(startup?.dry_run)} onChange={() => void toggleDryRun()} />
-              <span>Dry-run mode</span>
-            </label>
-            <label className="toggle">
-              <input type="checkbox" checked={Boolean(startup?.verbose)} onChange={() => void toggleVerbose()} />
-              <span>Verbose output</span>
-            </label>
-          </section>
-
-          <section className="side-section action-list">
-            <button onClick={() => void undo()}><RotateCcw size={16} /> Undo Last</button>
-            <button onClick={() => void newSession()}><Sparkles size={16} /> New Session</button>
-          </section>
-
-          <section className="side-section roots">
-            <h3>Allowed Roots</h3>
-            {(startup?.allowed_roots ?? []).map((root) => (
-              <div className="root-row" key={root}><FolderOpen size={14} /> {root}</div>
-            ))}
-          </section>
-        </aside>
-
+        <CompactRail
+          startup={startup}
+          models={models}
+          selectedModelKnown={selectedModelKnown}
+          onModel={(model) => void setMode(model)}
+          onUndo={() => void undo()}
+          onNewSession={() => void newSession()}
+          onOpenControls={() => setControlsOpen(true)}
+          onOpenOutputs={() => setOutputsOpen(true)}
+          outputsCount={artifacts.length}
+        />
         <section className="workspace">
           <div className="transcript-header">
             <div>
-              <h1>Transcript</h1>
+              <h1>Conversation</h1>
               <p>{session?.id ? `Session ${session.id}` : "Starting session..."}</p>
             </div>
-            {toolActivity && <div className="activity"><Loader2 size={15} className="spin" /> {toolActivity}</div>}
           </div>
-
-          <div className="transcript" ref={transcriptRef}>
-            {groupedItems.length === 0 ? (
-              <div className="welcome">
-                <Shield size={26} />
-                <h2>Ready when you are.</h2>
-                <p>Ask for a local task. The backend will narrate its plan, show progress, and request approval before sensitive or mutating actions.</p>
-                <div className="quick-grid">
-                  {quickPrompts.map((prompt) => (
-                    <button key={prompt} onClick={() => setInput(prompt)}>{prompt}</button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              groupedItems.map((item, index) => {
-                if (item.role === "progress") {
-                  const previous = groupedItems[index - 1];
-                  if (previous?.role === "progress") return null;
-                  const cluster: ProgressItem[] = [];
-                  for (let i = index; i < groupedItems.length; i += 1) {
-                    const candidate = groupedItems[i];
-                    if (candidate.role !== "progress") break;
-                    cluster.push(candidate as ProgressItem);
-                  }
-                  return <ProgressCluster key={item.id} items={cluster} />;
-                }
-                return (
-                  <article key={item.id} className={cls("message", item.role)}>
-                    <div className="message-role">{item.role}</div>
-                    <div className="message-text">
-                      {item.role === "assistant" ? <MarkdownText text={item.text} /> : item.text}
-                    </div>
-                  </article>
-                );
-              })
-            )}
-          </div>
-
-          {error && (
-            <div className="error-strip">
-              <AlertTriangle size={16} /> {error}
-            </div>
-          )}
-
-          <form className="composer" onSubmit={(event) => void submit(event)}>
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder="Tell the agent what to do..."
-            />
-            <button type="submit" disabled={!canSend}>
-              <Send size={17} />
-              Send
-            </button>
-          </form>
+          <Transcript
+            items={groupedItems}
+            quickPrompts={quickPrompts}
+            onPrompt={setInput}
+            transcriptRef={transcriptRef}
+            expandedToolGroups={expandedToolGroups}
+            expandedResultIds={expandedResultIds}
+            onToggleToolGroup={toggleToolGroup}
+            onToggleResult={toggleResult}
+          />
+          <ErrorRecovery
+            error={error}
+            bypassOn={Boolean(startup?.bypass_approvals)}
+            onRetry={() => void retryLastPrompt()}
+            onSwitchModel={() => void switchModelRecovery()}
+            onDisableBypass={() => void (startup?.bypass_approvals ? toggleBypassApprovals() : undefined)}
+            onOpenLogs={() => void openLogs()}
+            onNewSession={() => void newSession()}
+          />
+          <Composer
+            input={input}
+            canSend={canSend}
+            busy={Boolean(session?.busy)}
+            onInput={setInput}
+            onSubmit={(event) => void submit(event)}
+            onStop={() => void stop()}
+            onTools={() => setControlsOpen(true)}
+          />
         </section>
       </section>
-
-      {activeApproval && (
-        <div className="approval-backdrop">
-          <section className={cls("approval-card", activeApproval.risk_level)}>
-            <header>
-              <div>
-                <h2>Approval Required</h2>
-                <p>{activeApproval.summary}</p>
-              </div>
-              <span className="risk">{activeApproval.risk_level}</span>
-            </header>
-            <div className="approval-actions">
-              {activeApproval.actions.map((action) => (
-                <div className="approval-row" key={`${action.index}-${action.label}`}>
-                  <span>{action.index}</span>
-                  <div>
-                    <strong>{action.tool_name}</strong>
-                    <p>{action.label}</p>
-                  </div>
-                  <em>{action.risk}</em>
-                </div>
-              ))}
-            </div>
-            {activeApproval.dry_run && <div className="dry-run"><ClipboardCheck size={15} /> Dry-run is on; actions will be simulated.</div>}
-            <footer>
-              <button className="approve" onClick={() => void approve("yes")}><Check size={17} /> Approve</button>
-              <button className="cancel" onClick={() => void approve("cancel")}><X size={17} /> Deny</button>
-            </footer>
-          </section>
-        </div>
-      )}
+      <Drawer title="Controls" open={controlsOpen} onClose={() => setControlsOpen(false)}>
+        <ControlsDrawer
+          startup={startup}
+          savedSessions={savedSessions}
+          onModelLock={() => void toggleModelLock()}
+          onDryRun={() => void toggleDryRun()}
+          onVerbose={() => void toggleVerbose()}
+          onBypass={() => void toggleBypassApprovals()}
+          onRestoreSession={(id) => void restoreSession(id)}
+          onAddRoot={(path) => void addRoot(path)}
+          onRemoveRoot={(path) => void removeRoot(path)}
+          onResetRoots={() => void resetRoots()}
+        />
+      </Drawer>
+      <Drawer title="Outputs" open={outputsOpen} onClose={() => setOutputsOpen(false)}>
+        <OutputsDrawer artifacts={artifacts} />
+      </Drawer>
+      <Drawer title="Task" open={taskOpen} onClose={() => setTaskOpen(false)}>
+        <TaskDrawer session={session} activity={toolActivity} lastPhase={lastPhase} />
+      </Drawer>
+      <ApprovalModal approval={activeApproval} onApprove={(answer) => void approve(answer)} />
     </main>
   );
 }

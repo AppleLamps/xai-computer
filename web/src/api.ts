@@ -4,6 +4,8 @@ export type Startup = {
   allowed_roots: string[];
   dry_run: boolean;
   verbose: boolean;
+  bypass_approvals: boolean;
+  auto_switch_models: boolean;
   max_tool_loops: number;
 };
 
@@ -11,8 +13,19 @@ export type SessionInfo = {
   id: string;
   created: string;
   busy: boolean;
+  stopped: boolean;
+  bypass_approvals: boolean;
+  active_error?: string | null;
   event_count: number;
   token_totals: Record<string, number>;
+};
+
+export type SavedSession = {
+  id?: string;
+  title?: string;
+  created?: string;
+  updated?: string;
+  token_totals?: Record<string, number>;
 };
 
 export type ApprovalAction = {
@@ -45,8 +58,13 @@ export type WebEvent = {
     | "error"
     | "progress"
     | "approval"
+    | "auto_approved"
+    | "artifact"
+    | "tool_result"
     | "tool_start"
     | "tool_end"
+    | "phase"
+    | "stopped"
     | "usage"
     | "done";
   payload: Record<string, unknown>;
@@ -68,10 +86,19 @@ export async function getStartup(sessionId?: string): Promise<{
   startup: Startup;
   models: Record<string, string>;
   session: SessionInfo;
-  saved_sessions: Array<Record<string, unknown>>;
+  saved_sessions: SavedSession[];
 }> {
   const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
   return request(`/api/startup${query}`);
+}
+
+export async function getSession(sessionId: string): Promise<{
+  ok: true;
+  startup: Startup;
+  session: SessionInfo;
+  events: WebEvent[];
+}> {
+  return request(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export async function createSession(): Promise<{ ok: true; session: SessionInfo }> {
@@ -94,6 +121,14 @@ export async function getEvents(sessionId: string, after: number): Promise<{
   return request(`/api/events?session_id=${encodeURIComponent(sessionId)}&after=${after}`);
 }
 
+export async function stopSession(sessionId: string): Promise<{ ok: true; stopping: boolean; session_id: string }> {
+  return request("/api/stop", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ session_id: sessionId })
+  });
+}
+
 export async function answerApproval(sessionId: string, generation: number, answer: "yes" | "cancel"): Promise<{ ok: true }> {
   return request("/api/approval", {
     method: "POST",
@@ -102,8 +137,23 @@ export async function answerApproval(sessionId: string, generation: number, answ
   });
 }
 
-export async function updateSettings(input: { dry_run?: boolean; verbose?: boolean; model?: string }): Promise<{ ok: true; startup: Startup }> {
+export async function updateSettings(input: {
+  session_id?: string;
+  dry_run?: boolean;
+  verbose?: boolean;
+  bypass_approvals?: boolean;
+  auto_switch_models?: boolean;
+  model?: string;
+}): Promise<{ ok: true; startup: Startup }> {
   return request("/api/settings", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
+  });
+}
+
+export async function updateAllowedRoots(input: { action: "add" | "remove" | "reset"; path?: string }): Promise<{ ok: true; startup: Startup }> {
+  return request("/api/allowed-roots", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(input)
@@ -112,4 +162,12 @@ export async function updateSettings(input: { dry_run?: boolean; verbose?: boole
 
 export async function undoLast(): Promise<Record<string, unknown>> {
   return request("/api/undo", { method: "POST", headers: jsonHeaders, body: "{}" });
+}
+
+export async function openLogsFolder(): Promise<Record<string, unknown>> {
+  return request("/api/open-logs", { method: "POST", headers: jsonHeaders, body: "{}" });
+}
+
+export function localFileUrl(path: string): string {
+  return `/api/local-file?path=${encodeURIComponent(path)}`;
 }

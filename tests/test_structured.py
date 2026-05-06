@@ -119,7 +119,7 @@ class TestStructuredParseFallback:
         result = structured_parse(
             ShellCommandExplanation,
             "explain git status",
-            model="grok-4-1-fast-reasoning",
+            model="grok-4.3-latest",
         )
         assert result is None
 
@@ -130,7 +130,7 @@ class TestStructuredParseFallback:
         result = structured_parse(
             ShellCommandExplanation,
             "explain git status",
-            model="grok-4-1-fast-reasoning",
+            model="grok-4.3-latest",
         )
         # No SDK/API call should be attempted during tests.
         assert result is None

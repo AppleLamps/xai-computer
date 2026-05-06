@@ -65,7 +65,7 @@ class TestCodingModelRouting:
         """When XAI_CODING_MODEL is not set, no routing happens."""
         monkeypatch.setattr("core.get_coding_model", lambda: None)
         from config import get_xai_model, set_runtime_model, MODELS
-        set_runtime_model(MODELS["fast"], user_initiated=False)
+        set_runtime_model(MODELS["grok-4.3-latest"], user_initiated=False)
         original = get_xai_model()
 
         # Simulate what handle_user_turn would do
@@ -76,9 +76,9 @@ class TestCodingModelRouting:
 
     def test_no_routing_when_user_set_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When user explicitly set a model, auto-routing is skipped."""
-        monkeypatch.setattr("core.get_coding_model", lambda: "grok-code-fast-1")
+        monkeypatch.setattr("core.get_coding_model", lambda: "custom-coding-model")
         from config import set_runtime_model, user_has_set_model
-        set_runtime_model("grok-4-1-fast-reasoning", user_initiated=True)
+        set_runtime_model("grok-4.3-latest", user_initiated=True)
         assert user_has_set_model() is True
         # The guard in handle_user_turn checks user_has_set_model()
         # so routing would be skipped
@@ -89,10 +89,10 @@ class TestCodingModelRouting:
         import config
         # Reset user_set flag
         config._user_set_model = False
-        set_runtime_model("grok-4-1-fast-reasoning", user_initiated=False)
+        set_runtime_model("grok-4.3-latest", user_initiated=False)
         original = get_xai_model()
 
-        monkeypatch.setattr("core.get_coding_model", lambda: "grok-code-fast-1")
+        monkeypatch.setattr("core.get_coding_model", lambda: "custom-coding-model")
 
         # Simulate the routing logic from handle_user_turn
         from core import _detect_coding_intent, set_runtime_model as core_set
@@ -100,8 +100,8 @@ class TestCodingModelRouting:
         assert _detect_coding_intent(msg)
 
         saved = get_xai_model()
-        set_runtime_model("grok-code-fast-1", user_initiated=False)
-        assert get_xai_model() == "grok-code-fast-1"
+        set_runtime_model("custom-coding-model", user_initiated=False)
+        assert get_xai_model() == "custom-coding-model"
 
         # Simulate finally block
         set_runtime_model(saved, user_initiated=False)
@@ -114,9 +114,9 @@ class TestCodingModelRouting:
         config._runtime_model = None
 
         from config import set_runtime_model, user_has_set_model
-        set_runtime_model("grok-code-fast-1", user_initiated=False)
+        set_runtime_model("custom-coding-model", user_initiated=False)
         assert not user_has_set_model()
 
         # But user-initiated does
-        set_runtime_model("grok-4-1-fast-reasoning", user_initiated=True)
+        set_runtime_model("grok-4.3-latest", user_initiated=True)
         assert user_has_set_model()

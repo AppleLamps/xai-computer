@@ -9,8 +9,10 @@ from typing import Any
 
 from config import (
     MODELS,
+    MODEL_ALIASES,
     get_last_working_folder,
     get_xai_model,
+    is_auto_switch_models,
     is_dry_run,
     is_verbose,
     set_dry_run,
@@ -81,7 +83,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/undo": "Undo the last reversible action  (or /undo N to undo last N)",
     "/dry-on": "Enable dry-run mode (simulate only)",
     "/dry-off": "Disable dry-run mode (execute normally)",
-    "/model": "Show or switch model (/model fast, /model quality)",
+    "/model": "Show or switch model (/model grok-4.3-latest)",
     "/mode": "Switch output mode (/mode concise, /mode verbose)",
     "/analyze": "Analyze a directory (/analyze <path>)",
     "/tree": "Show directory tree (/tree <path> [depth])",
@@ -106,7 +108,7 @@ def _handle_status(sink: TerminalSink) -> None:
     lwf = get_last_working_folder()
     lwf_label = str(lwf) if lwf else "(none)"
     cm = info.get("coding_model")
-    cm_label = f"{cm} (auto-routing enabled)" if cm else "not configured"
+    cm_label = f"{cm} (auto-routing enabled)" if cm and is_auto_switch_models() else (f"{cm} (auto-routing off)" if cm else "not configured")
     sink.info(f"\n  Session:          {SESSION_ID}")
     sink.info(f"  Model:            {info['model']}")
     sink.info(f"  Coding model:     {cm_label}")
@@ -192,13 +194,17 @@ def _handle_model(args: str, sink: TerminalSink) -> None:
         sink.info("Available presets:")
         for key, model_id in MODELS.items():
             marker = " (active)" if get_xai_model() == model_id else ""
-            sink.info(f"  {key:10s}  {model_id}{marker}")
-        sink.info('Usage: /model fast  OR  /model quality  OR  /model <full-model-id>')
+            sink.info(f"  {key:32s}  {model_id}{marker}")
+        sink.info("Aliases: fast, quality, code (all map to grok-4.3-latest)")
+        sink.info("Usage: /model grok-4.3-latest  OR  /model <full-model-id>")
         return
 
     if arg in MODELS:
         set_runtime_model(MODELS[arg])
         sink.info(f"Switched to: {MODELS[arg]}")
+    elif arg in MODEL_ALIASES:
+        set_runtime_model(MODEL_ALIASES[arg])
+        sink.info(f"Switched to: {MODEL_ALIASES[arg]}")
     else:
         set_runtime_model(arg)
         sink.info(f"Switched to custom model: {arg}")

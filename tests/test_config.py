@@ -6,10 +6,14 @@ from pathlib import Path
 
 from config import (
     MODELS,
+    get_web_settings,
     get_last_working_folder,
+    get_max_tool_loops,
     get_xai_model,
+    is_auto_switch_models,
     is_dry_run,
     is_verbose,
+    set_auto_switch_models,
     set_dry_run,
     set_last_working_folder,
     set_runtime_model,
@@ -43,18 +47,46 @@ class TestVerboseMode:
 
 class TestModelSwitching:
     def test_default_model(self) -> None:
-        set_runtime_model(MODELS["fast"])
-        assert get_xai_model() == MODELS["fast"]
+        set_runtime_model(MODELS["grok-4.3-latest"])
+        assert get_xai_model() == MODELS["grok-4.3-latest"]
 
-    def test_switch_to_quality(self) -> None:
-        set_runtime_model(MODELS["quality"])
-        assert get_xai_model() == MODELS["quality"]
-        set_runtime_model(MODELS["fast"])
+    def test_legacy_model_is_normalized(self) -> None:
+        set_runtime_model("grok-old-local-setting")
+        assert get_xai_model() == MODELS["grok-4.3-latest"]
+        set_runtime_model(MODELS["grok-4.3-latest"])
 
     def test_custom_model(self) -> None:
         set_runtime_model("custom-model-v1")
         assert get_xai_model() == "custom-model-v1"
-        set_runtime_model(MODELS["fast"])
+        set_runtime_model(MODELS["grok-4.3-latest"])
+
+
+class TestApprovalAndModelToggles:
+    def test_auto_switch_models_toggle(self) -> None:
+        set_auto_switch_models(True)
+        assert is_auto_switch_models()
+        set_auto_switch_models(False)
+        assert not is_auto_switch_models()
+        set_auto_switch_models(True)
+
+    def test_persisted_web_settings(self, tmp_path: Path, monkeypatch) -> None:
+        import config
+        monkeypatch.setattr(config, "get_state_dir", lambda: tmp_path)
+        set_dry_run(True, persist=True)
+        set_verbose(False, persist=True)
+        set_auto_switch_models(False, persist=True)
+        set_runtime_model("grok-4.3-latest", user_initiated=False, persist=True)
+
+        settings = get_web_settings()
+        assert settings["dry_run"] is True
+        assert settings["verbose"] is False
+        assert settings["auto_switch_models"] is False
+        assert settings["model"] == "grok-4.3-latest"
+
+        set_dry_run(False)
+        set_verbose(True)
+        set_auto_switch_models(True)
+        set_runtime_model(MODELS["grok-4.3-latest"], user_initiated=False)
 
 
 class TestSessionMemory:
@@ -71,9 +103,17 @@ class TestSessionMemory:
 
 class TestModelPresets:
     def test_presets_exist(self) -> None:
-        assert "fast" in MODELS
-        assert "quality" in MODELS
+        assert list(MODELS) == ["grok-4.3-latest"]
 
     def test_preset_values(self) -> None:
-        assert "grok" in MODELS["fast"]
-        assert "grok" in MODELS["quality"]
+        assert MODELS["grok-4.3-latest"] == "grok-4.3-latest"
+
+
+class TestToolLoopLimit:
+    def test_default_tool_loop_limit_is_24(self, monkeypatch) -> None:
+        monkeypatch.delenv("XAI_MAX_TOOL_LOOPS", raising=False)
+        assert get_max_tool_loops() == 24
+
+    def test_invalid_tool_loop_limit_falls_back_to_24(self, monkeypatch) -> None:
+        monkeypatch.setenv("XAI_MAX_TOOL_LOOPS", "not-a-number")
+        assert get_max_tool_loops() == 24

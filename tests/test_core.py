@@ -494,6 +494,93 @@ class TestRunTurnRollback:
         sink.error.assert_called_once()
 
 
+class TestRunTurnToolLoopContinuation:
+    def _make_sink(self, answer: str = "yes") -> MagicMock:
+        sink = MagicMock()
+        sink.info = MagicMock()
+        sink.error = MagicMock()
+        sink.assistant = MagicMock()
+        sink.plan = MagicMock()
+        sink.progress = MagicMock()
+        sink.prompt_confirmation = MagicMock(return_value=answer)
+        sink.cancel_stream = MagicMock()
+        return sink
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=1)
+    @patch("core._chat_with_optional_web_tools")
+    def test_loop_limit_can_continue_after_user_approval(
+        self,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+        mock_dispatch: MagicMock,
+    ) -> None:
+        mock_chat.side_effect = [
+            ChatCompletionResult(
+                message_role="assistant",
+                content="I'll inspect that.",
+                tool_calls=[ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/tmp"})],
+                raw={},
+            ),
+            ChatCompletionResult(
+                message_role="assistant",
+                content="Done.",
+                tool_calls=[],
+                raw={},
+            ),
+        ]
+        sink = self._make_sink("yes")
+        messages: list = []
+
+        _run_turn(messages, "show me a folder", sink)
+
+        assert mock_chat.call_count == 2
+        sink.plan.assert_called()
+        card = sink.plan.call_args.args[0]
+        assert isinstance(card, ApprovalCard)
+        assert card.action_class == "continuation"
+        assert any("configured tool loop limit" in c.args[0] for c in sink.info.call_args_list)
+        sink.assistant.assert_called_with("Done.")
+        sink.error.assert_not_called()
+
+    @patch("core.dispatch_tool", return_value={"ok": True})
+    @patch("core.get_tool_definitions", return_value=[])
+    @patch("core.get_xai_model", return_value="test-model")
+    @patch("core.get_xai_api_key", return_value="test-key")
+    @patch("core.get_max_tool_loops", return_value=1)
+    @patch("core._chat_with_optional_web_tools")
+    def test_loop_limit_decline_stops_without_rollback(
+        self,
+        mock_chat: MagicMock,
+        mock_loops: MagicMock,
+        mock_key: MagicMock,
+        mock_model: MagicMock,
+        mock_tools: MagicMock,
+        mock_dispatch: MagicMock,
+    ) -> None:
+        mock_chat.return_value = ChatCompletionResult(
+            message_role="assistant",
+            content="I'll inspect that.",
+            tool_calls=[ToolCallSpec(id="c1", name="list_directory", arguments={"path": "/tmp"})],
+            raw={},
+        )
+        sink = self._make_sink("cancel")
+        messages = [{"role": "assistant", "content": "previous"}]
+
+        _run_turn(messages, "show me a folder", sink)
+
+        assert mock_chat.call_count == 1
+        assert any(m.get("content") == "show me a folder" for m in messages)
+        assert any("continuing was not approved" in m.get("content", "") for m in messages)
+        sink.error.assert_not_called()
+
+
 class TestRunTurnClipboardGuard:
     def _make_sink(self) -> MagicMock:
         sink = MagicMock()

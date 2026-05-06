@@ -26,7 +26,7 @@ Requirements:
 Install and configure:
 
 ```powershell
-cd C:\Users\lucas\Desktop\xai-computer
+cd path\to\xai-computer
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -52,6 +52,14 @@ Or use the Windows launcher:
 .\Start-Web-Agent.ps1
 ```
 
+The server prints a launch URL that includes a one-time authentication token, for example:
+
+```text
+http://127.0.0.1:8765/?token=<random-token>
+```
+
+Open that URL in a browser. The token is required for every API call and rotates on every server restart. `--open` launches the browser at the tokenized URL automatically. If you open `http://127.0.0.1:8765/` directly in a fresh tab, the page will display an "Authentication needed" banner with instructions to paste the launch URL from the terminal.
+
 For frontend development:
 
 ```powershell
@@ -76,7 +84,10 @@ python web_server.py --open
 
 The web app is the recommended interface. It provides:
 
-- Chat-first transcript and fixed composer
+- Chat-first transcript with token-by-token streaming of assistant responses
+- Server-Sent Events transport for low-latency event delivery (no client polling)
+- Per-launch auth token, Host validation, and same-origin scoping for the local API
+- Fixed composer with quick-prompt suggestions
 - Compact status, model, dry-run, and BYPASS ALL indicators
 - Controls drawer for settings, allowed roots, recent sessions, and diagnostics
 - Outputs drawer for screenshots, generated/copied files, downloads, and clipboard summaries
@@ -123,6 +134,10 @@ Available web model choices:
 ## Safety Model
 
 The agent is designed to be useful without being reckless.
+
+**Local API authentication.** The web server mints a fresh random token on every launch. Every `/api/*` request must present that token, either as an `X-Auth-Token` header (used by the bundled SPA) or as a `?token=` query parameter (used for `<img>`-style artifact loads). Requests with a `Host` header that does not resolve to the bound local address are rejected, which mitigates DNS-rebinding attacks. The token is not persisted; restarting the server rotates it.
+
+**Scoped local-file serving.** The `/api/local-file` endpoint only serves paths that the agent itself has produced as artifacts (screenshots, downloads, files written by approved tools). It does not serve arbitrary paths inside allowed roots over HTTP, even with a valid token.
 
 **Allowed roots.** File reads and mutations are restricted to configured local roots. By default, these are the current user's Desktop, Documents, and Downloads folders.
 
@@ -193,7 +208,7 @@ Important modules:
 
 | Path | Purpose |
 | --- | --- |
-| `web_server.py` | Local HTTP API and static web app server |
+| `web_server.py` | Local HTTP API, SSE event stream, auth gate, static web app server |
 | `web/` | React/Vite frontend |
 | `core.py` | Turn orchestration, tool loop, approvals, narration, cancellation |
 | `schemas.py` | System prompt and model-facing tool schemas |
@@ -202,7 +217,7 @@ Important modules:
 | `shell_guard.py` | Deterministic shell command classification |
 | `undo.py` | Undo history and reversal |
 | `session_store.py` | Saved web sessions |
-| `xai_client.py` | xAI chat completions client |
+| `xai_client.py` | xAI chat completions client (streaming and non-streaming) |
 
 See [Architecture](docs/ARCHITECTURE.md) for more detail.
 
@@ -245,7 +260,11 @@ Generated/runtime files are intentionally ignored by Git:
 
 **Missing API key.** Copy `.env.example` to `.env` and set `XAI_API_KEY`.
 
+**Authentication required banner.** The web app token rotates on every server restart, and is not persisted across browser tabs. Reopen the launch URL printed in the terminal (the line containing `?token=...`). If the terminal output is not visible, restart the server with `--open`.
+
 **Web app shows stale UI.** Rebuild with `cd web; npm run build`, then restart `python web_server.py --open`.
+
+**Connection lost in the web UI.** The SPA opens a single Server-Sent Events connection to `/api/stream` and reconnects automatically. If the banner reports a lost connection, confirm the Python process is still running and reload the tab.
 
 **Path not allowed.** The requested path is outside allowed roots. Update `XAI_ASSISTANT_ALLOWED_ROOTS` if needed.
 
@@ -256,3 +275,18 @@ Generated/runtime files are intentionally ignored by Git:
 **Shell command blocked.** The shell guard rejected a dangerous pattern. Use a dedicated tool or a safer command.
 
 **Undo cannot restore.** Undo never overwrites existing files and never removes non-empty folders; check the undo result for the restored path or reason.
+
+## Recent Updates
+
+### 2026-05-06
+
+- Hardened the local web server: every `/api/*` request requires a per-launch auth token (rotated on each restart), the `Host` header is validated against the bound address to mitigate DNS rebinding, and wildcard CORS has been removed.
+- Restricted `/api/local-file` to artifacts the agent itself produces. Arbitrary paths inside allowed roots are no longer served over HTTP, even with a valid token.
+- Closed a turn-lifecycle race: `WebSession.active_turn_id`, `active_error`, and `stopped` are now mutated under the session lock, so a stop request that arrives during turn handoff is no longer dropped.
+- Streamed assistant responses token-by-token in the web UI. `WebSink.stream_delta` emits incremental chunks that are coalesced into a streaming bubble with a blinking caret until the final assistant message arrives.
+- Replaced the polling event loop with a Server-Sent Events transport at `/api/stream`. The frontend opens a single `EventSource` per session, supports `Last-Event-ID` resume on reconnect, and derives session metadata from the event log.
+- Added an authentication-aware error banner. When a request returns 401, the UI surfaces a tailored "copy the launch URL" message instead of the generic retry strip.
+
+### Session pause — 2026-05-06
+
+Stopping work for the night. The current branch is clean against `master` aside from the changes summarized above; the Python import check and `npm run build` both pass, and the SSE endpoint has been smoke-tested with `curl`. End-to-end browser verification against a live model turn is still outstanding.

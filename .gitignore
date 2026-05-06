@@ -46,3 +46,21 @@ desktop.ini
 .idea/
 *.tmp
 *.bak
+*.swp
+*.swo
+*~
+
+# Local agent / assistant state
+.claude/
+.aider*
+.cursor/
+
+# Python build artifacts
+build/
+dist/
+*.whl
+
+# Local notebooks and scratch
+*.ipynb_checkpoints/
+scratch/
+tmp/

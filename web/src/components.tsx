@@ -256,6 +256,7 @@ export function ProgressCluster({
 
 export function Transcript({
   items,
+  streamingText,
   quickPrompts,
   onPrompt,
   transcriptRef,
@@ -265,6 +266,7 @@ export function Transcript({
   onToggleResult,
 }: {
   items: TranscriptItem[];
+  streamingText?: string;
   quickPrompts: string[];
   onPrompt: (prompt: string) => void;
   transcriptRef: RefObject<HTMLDivElement | null>;
@@ -273,10 +275,11 @@ export function Transcript({
   onToggleToolGroup: (id: string) => void;
   onToggleResult: (id: string) => void;
 }) {
+  const showStreamingBubble = Boolean(streamingText && streamingText.length > 0);
   return (
     <div className="transcript" ref={transcriptRef}>
       <div className="transcript-inner">
-        {items.length === 0 ? (
+        {items.length === 0 && !showStreamingBubble ? (
           <div className="welcome">
             <Shield size={28} />
             <h2>Ready when you are.</h2>
@@ -327,6 +330,15 @@ export function Transcript({
               </article>
             );
           })
+        )}
+        {showStreamingBubble && (
+          <article className={cls("message", "assistant", "streaming")} aria-live="polite">
+            <div className="message-role">assistant</div>
+            <div className="message-text">
+              <MarkdownText text={streamingText ?? ""} />
+              <span className="streaming-caret" aria-hidden="true" />
+            </div>
+          </article>
         )}
       </div>
     </div>
@@ -602,22 +614,38 @@ export function OutputsDrawer({ artifacts }: { artifacts: Artifact[] }) {
 
 export function ErrorRecovery({
   error,
+  isAuthError,
   bypassOn,
   onRetry,
   onSwitchModel,
   onDisableBypass,
   onOpenLogs,
   onNewSession,
+  onReload,
 }: {
   error: string | null;
+  isAuthError?: boolean;
   bypassOn: boolean;
   onRetry: () => void;
   onSwitchModel: () => void;
   onDisableBypass: () => void;
   onOpenLogs: () => void;
   onNewSession: () => void;
+  onReload?: () => void;
 }) {
   if (!error) return null;
+  if (isAuthError) {
+    return (
+      <div className="error-strip auth">
+        <AlertTriangle size={16} />
+        <span>
+          Authentication needed. Copy the launch URL from your terminal — the line that
+          starts with <code>http://...?token=...</code> — and paste it into this tab.
+        </span>
+        {onReload && <button onClick={onReload}>Reload tab</button>}
+      </div>
+    );
+  }
   return (
     <div className="error-strip">
       <AlertTriangle size={16} />

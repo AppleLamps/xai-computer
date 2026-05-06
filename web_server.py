@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import secrets
 import threading
 import uuid
 import webbrowser
@@ -107,12 +108,36 @@ def _message_events_from_history(messages: list[dict[str, Any]]) -> list[tuple[s
     return events
 
 
+_artifact_lock = threading.Lock()
+_released_artifacts: set[str] = set()
+
+
+def _register_artifact_path(raw: Any) -> None:
+    if not raw:
+        return
+    try:
+        resolved = Path(str(raw)).expanduser().resolve()
+    except OSError:
+        return
+    key = str(resolved).casefold()
+    with _artifact_lock:
+        _released_artifacts.add(key)
+
+
+def _is_released_artifact(target: Path) -> bool:
+    key = str(target).casefold()
+    with _artifact_lock:
+        return key in _released_artifacts
+
+
 def _artifact_from_result(tool: str, result: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(result, dict) or not result.get("ok"):
         return None
     if tool in {"take_screenshot", "window_screenshot", "browser_screenshot"} and result.get("path"):
+        _register_artifact_path(result["path"])
         return {"kind": "screenshot", "title": tool, "path": str(result["path"]), "tool": tool}
     if tool == "browser_download" and result.get("path"):
+        _register_artifact_path(result["path"])
         return {"kind": "download", "title": "Browser download", "path": str(result["path"]), "tool": tool}
     if tool == "copy_to_clipboard":
         return {
@@ -128,6 +153,7 @@ def _artifact_from_result(tool: str, result: dict[str, Any]) -> dict[str, Any] |
             "write_file", "append_file", "replace_in_file", "apply_patch", "copy_file",
             "move_file", "rename_file", "create_folder",
         }:
+            _register_artifact_path(value)
             return {"kind": "file", "title": tool, "path": str(value), "tool": tool}
     return None
 
@@ -167,12 +193,15 @@ class WebSession:
     active_turn_id: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     approval_condition: threading.Condition = field(init=False)
+    event_condition: threading.Condition = field(init=False)
     approval_generation: int = 0
     approval_answer: str | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    closed: bool = False
 
     def __post_init__(self) -> None:
         self.approval_condition = threading.Condition(self.lock)
+        self.event_condition = threading.Condition(self.lock)
 
     def add_event(self, kind: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with self.lock:
@@ -186,6 +215,7 @@ class WebSession:
             self.events.append(event)
             if len(self.events) > 1000:
                 self.events = self.events[-1000:]
+            self.event_condition.notify_all()
             return event
 
     def events_after(self, after: int) -> list[dict[str, Any]]:
@@ -195,9 +225,6 @@ class WebSession:
     def set_busy(self, value: bool) -> None:
         with self.lock:
             self.busy = value
-            if value:
-                self.stopped = False
-                self.stop_event.clear()
 
     def set_approval(self, answer: str, generation: int | None = None) -> bool:
         with self.approval_condition:
@@ -243,12 +270,15 @@ class WebSink:
 
     def start_stream(self) -> None:
         self.session.add_event("phase", {"phase": "planning", "label": "Planning response"})
+        self.session.add_event("stream_start", {})
 
     def stream_delta(self, text: str) -> None:
-        return
+        if not text:
+            return
+        self.session.add_event("stream_delta", {"text": text})
 
     def cancel_stream(self) -> None:
-        return
+        self.session.add_event("stream_cancel", {})
 
     def tool_result(self, name: str, result: dict[str, Any]) -> None:
         payload = {"name": name, "result": result}
@@ -384,7 +414,9 @@ class SessionManager:
         with session.lock:
             if session.busy:
                 return {"ok": False, "error": "Session is already running a turn."}
-            session.set_busy(True)
+            session.busy = True
+            session.stopped = False
+            session.stop_event.clear()
             session.active_error = None
             session.active_turn_id = turn_id
         session.add_event("user", {"text": cleaned, "turn_id": turn_id})
@@ -394,19 +426,22 @@ class SessionManager:
             try:
                 handle_user_turn(session.messages, cleaned, sink)
             except Exception as e:  # noqa: BLE001
-                session.active_error = str(e)
+                with session.lock:
+                    session.active_error = str(e)
                 sink.error(f"[error] {e}")
             finally:
                 self.save(session)
-                canceled = session.stop_event.is_set() or session.stopped
-                if canceled and not session.active_error:
+                with session.lock:
+                    canceled = session.stop_event.is_set() or session.stopped
+                    current_error = session.active_error
+                    session.active_turn_id = None
+                if canceled and not current_error:
                     sink.info("Stopped by user.")
                     session.add_event("stopped", {"turn_id": turn_id})
                 session.set_busy(False)
-                session.active_turn_id = None
                 session.add_event("done", {
                     "turn_id": turn_id,
-                    "error": session.active_error,
+                    "error": current_error,
                     "canceled": canceled,
                 })
 
@@ -415,7 +450,9 @@ class SessionManager:
 
     def stop_turn(self, session: WebSession) -> dict[str, Any]:
         was_busy = session.request_stop()
-        session.add_event("stopped", {"turn_id": session.active_turn_id, "requested": True})
+        with session.lock:
+            current_turn_id = session.active_turn_id
+        session.add_event("stopped", {"turn_id": current_turn_id, "requested": True})
         return {"ok": True, "stopping": was_busy, "session_id": session.session_id}
 
 
@@ -424,6 +461,7 @@ MANAGER = SessionManager()
 
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "XaiComputerWeb/0.1"
+    auth_token: str = ""
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -433,9 +471,8 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -449,11 +486,58 @@ class WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _expected_hosts(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
+    def _check_host(self) -> bool:
+        host = (self.headers.get("Host") or "").strip().lower()
+        return host in self._expected_hosts()
+
+    def _check_auth(self, parsed) -> bool:
+        expected = WebHandler.auth_token
+        if not expected:
+            return False
+        provided = self.headers.get("X-Auth-Token") or ""
+        if not provided and parsed is not None:
+            qs = parse_qs(parsed.query)
+            provided = qs.get("token", [""])[0]
+        if not provided:
+            return False
+        try:
+            return secrets.compare_digest(provided, expected)
+        except (TypeError, ValueError):
+            return False
+
+    def _reject(self, status: int, message: str) -> None:
+        body = json.dumps({"ok": False, "error": message}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _gate_api(self, parsed) -> bool:
+        if not self._check_host():
+            self._reject(HTTPStatus.FORBIDDEN, "Host header rejected.")
+            return False
+        if not self._check_auth(parsed):
+            self._reject(HTTPStatus.UNAUTHORIZED, "Authentication required.")
+            return False
+        return True
+
     def do_OPTIONS(self) -> None:
-        self._send_json({"ok": True})
+        self._reject(HTTPStatus.METHOD_NOT_ALLOWED, "Preflight not supported.")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            if not self._gate_api(parsed):
+                return
+        elif not self._check_host():
+            self._reject(HTTPStatus.FORBIDDEN, "Host header rejected.")
+            return
         if parsed.path == "/api/startup":
             session = MANAGER.get_session(parse_qs(parsed.query).get("session_id", [None])[0])
             self._send_json({
@@ -488,6 +572,10 @@ class WebHandler(BaseHTTPRequestHandler):
                 "events": session.events_after(after),
             })
             return
+        if parsed.path == "/api/stream":
+            qs = parse_qs(parsed.query)
+            self._serve_event_stream(qs)
+            return
         if parsed.path == "/api/sessions":
             self._send_json({"ok": True, "sessions": MANAGER.list_sessions()})
             return
@@ -502,6 +590,8 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if not self._gate_api(parsed):
+            return
         body = self._read_json()
         if parsed.path == "/api/sessions":
             session = MANAGER.create_session()
@@ -621,40 +711,101 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if request_path in ("", "/") or request_path.endswith(".html"):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_event_stream(self, qs: dict[str, list[str]]) -> None:
+        session_id = qs.get("session_id", [None])[0]
+        session = MANAGER.get_session(session_id)
+        last_header = self.headers.get("Last-Event-ID")
+        try:
+            after = int(last_header) if last_header else int(qs.get("after", ["0"])[0])
+        except ValueError:
+            after = 0
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+        except OSError:
+            return
+
+        def write_chunk(data: bytes) -> bool:
+            try:
+                self.wfile.write(data)
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                return False
+
+        last = after
+        if not write_chunk(f"retry: 1500\n: connected after={last}\n\n".encode("utf-8")):
+            return
+        keepalive_seconds = 20.0
+        while True:
+            with session.event_condition:
+                pending = [e for e in session.events if int(e["id"]) > last]
+                if not pending:
+                    woke_for_event = session.event_condition.wait(timeout=keepalive_seconds)
+                    if woke_for_event:
+                        pending = [e for e in session.events if int(e["id"]) > last]
+            if not pending:
+                if not write_chunk(b": keepalive\n\n"):
+                    return
+                continue
+            for event in pending:
+                payload = json.dumps(event, default=_json_default, ensure_ascii=False)
+                chunk = f"id: {event['id']}\ndata: {payload}\n\n".encode("utf-8")
+                if not write_chunk(chunk):
+                    return
+                last = int(event["id"])
+
     def _serve_local_file(self, raw_path: str) -> None:
+        sec_fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sec_fetch_site and sec_fetch_site != "same-origin":
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
         try:
             target = Path(raw_path).expanduser().resolve()
         except OSError:
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
-        state_root = get_state_dir().resolve()
-        allowed = False
-        try:
-            target.relative_to(state_root)
-            allowed = True
-        except ValueError:
-            allowed = is_path_allowed(target)
-        if not allowed or not target.exists() or not target.is_file():
+        if not _is_released_artifact(target) or not target.exists() or not target.is_file():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         data = target.read_bytes()
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        disposition = "inline" if ctype.startswith("image/") else "attachment"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Content-Disposition",
+            f'{disposition}; filename="{target.name}"',
+        )
         self.end_headers()
         self.wfile.write(data)
 
 
 def run(host: str = "127.0.0.1", port: int = 8765, *, open_browser: bool = False) -> None:
+    token = secrets.token_urlsafe(32)
+    WebHandler.auth_token = token
     server = ThreadingHTTPServer((host, port), WebHandler)
-    url = f"http://{host}:{port}"
-    print(f"xai-computer web server running at {url}")
+    base_url = f"http://{host}:{port}"
+    launch_url = f"{base_url}/?token={token}"
+    print(f"xai-computer web server running at {base_url}")
+    print(f"Open this URL in your browser (token rotates every launch):\n  {launch_url}")
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(launch_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

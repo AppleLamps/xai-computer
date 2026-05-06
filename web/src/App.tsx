@@ -1,15 +1,16 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApprovalCard,
+  AUTH_REQUIRED_MESSAGE,
   WebEvent,
   answerApproval,
   createSession,
-  getEvents,
   getSession,
   getStartup,
   openLogsFolder,
   sendMessage,
   stopSession,
+  streamUrl,
   undoLast,
   updateAllowedRoots,
   updateSettings,
@@ -83,7 +84,6 @@ export function App() {
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [lastEventId, setLastEventId] = useState(0);
   const [input, setInput] = useState("");
   const [lastPrompt, setLastPrompt] = useState("");
   const [activeApproval, setActiveApproval] = useState<ApprovalCard | null>(null);
@@ -97,7 +97,9 @@ export function App() {
   const [taskOpen, setTaskOpen] = useState(false);
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const [expandedResultIds, setExpandedResultIds] = useState<Set<string>>(new Set());
+  const [streamingText, setStreamingText] = useState("");
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const lastEventIdRef = useRef(0);
 
   useEffect(() => {
     getStartup()
@@ -114,60 +116,116 @@ export function App() {
       });
   }, []);
 
+  const processEvent = useCallback((event: WebEvent) => {
+    lastEventIdRef.current = Math.max(lastEventIdRef.current, event.id);
+
+    if (event.kind === "stream_start") {
+      setStreamingText("");
+    } else if (event.kind === "stream_delta") {
+      const chunk = String(event.payload.text ?? "");
+      if (chunk) setStreamingText((prev) => prev + chunk);
+    } else if (event.kind === "stream_cancel") {
+      setStreamingText("");
+    } else if (event.kind === "assistant") {
+      setStreamingText("");
+    }
+
+    const transcriptEntry = textFromEvent(event);
+    if (transcriptEntry) {
+      setItems((prev) => [...prev, transcriptEntry]);
+    }
+    const artifact = artifactFromEvent(event);
+    if (artifact) {
+      setArtifacts((prev) => [...prev, artifact]);
+    }
+
+    if (event.kind === "approval") {
+      setActiveApproval(event.payload.card as ApprovalCard);
+      setLastPhase("Waiting for approval");
+    } else if (event.kind === "auto_approved") {
+      setLastPhase("Auto-approved");
+    } else if (event.kind === "phase") {
+      setLastPhase(String(event.payload.label ?? event.payload.phase ?? "Working"));
+    } else if (event.kind === "tool_start") {
+      setToolActivity(String(event.payload.label ?? event.payload.name ?? ""));
+      setLastPhase(String(event.payload.label ?? "Running tool"));
+    } else if (event.kind === "tool_end") {
+      setToolActivity(null);
+    } else if (event.kind === "user") {
+      setSession((prev) => (prev ? { ...prev, busy: true, stopped: false, active_error: null, event_count: event.id } : prev));
+    } else if (event.kind === "stopped") {
+      setSending(false);
+      setLastPhase("Stopped");
+      setActiveApproval(null);
+      setStreamingText("");
+      setSession((prev) => (prev ? { ...prev, busy: false, stopped: true, event_count: event.id } : prev));
+    } else if (event.kind === "done") {
+      setSending(false);
+      const canceled = Boolean(event.payload.canceled);
+      const errorText = event.payload.error ? String(event.payload.error) : null;
+      setLastPhase(canceled ? "Stopped" : errorText ? "Error" : "Done");
+      setActiveApproval(null);
+      setStreamingText("");
+      setSession((prev) => (prev ? { ...prev, busy: false, active_error: errorText, stopped: canceled, event_count: event.id } : prev));
+    } else if (event.kind === "usage") {
+      const totals = (event.payload.totals as Record<string, number> | undefined) ?? null;
+      if (totals) {
+        setSession((prev) => (prev ? { ...prev, token_totals: totals, event_count: event.id } : prev));
+      }
+    } else {
+      setSession((prev) => (prev ? { ...prev, event_count: event.id } : prev));
+    }
+  }, []);
+
   useEffect(() => {
     if (!session?.id) return;
     let cancelled = false;
-    const poll = async () => {
-      try {
-        const data = await getEvents(session.id, lastEventId);
+    let source: EventSource | null = null;
+    let consecutiveErrors = 0;
+
+    const open = () => {
+      if (cancelled) return;
+      const after = lastEventIdRef.current;
+      const url = streamUrl(session.id, after);
+      const es = new EventSource(url);
+      source = es;
+      es.onopen = () => {
+        consecutiveErrors = 0;
+        setError(null);
+      };
+      es.onmessage = (msg) => {
         if (cancelled) return;
-        setSession(data.session);
-        if (data.events.length) {
-          setLastEventId(data.events[data.events.length - 1].id);
-          const next = data.events.map(textFromEvent).filter(Boolean) as TranscriptItem[];
-          const newArtifacts = data.events.map(artifactFromEvent).filter(Boolean) as Artifact[];
-          setItems((prev) => [...prev, ...next]);
-          if (newArtifacts.length) setArtifacts((prev) => [...prev, ...newArtifacts]);
-          for (const event of data.events) {
-            if (event.kind === "approval") {
-              setActiveApproval(event.payload.card as ApprovalCard);
-              setLastPhase("Waiting for approval");
-            }
-            if (event.kind === "auto_approved") setLastPhase("Auto-approved");
-            if (event.kind === "phase") setLastPhase(String(event.payload.label ?? event.payload.phase ?? "Working"));
-            if (event.kind === "tool_start") {
-              setToolActivity(String(event.payload.label ?? event.payload.name ?? ""));
-              setLastPhase(String(event.payload.label ?? "Running tool"));
-            }
-            if (event.kind === "tool_end") setToolActivity(null);
-            if (event.kind === "stopped") {
-              setSending(false);
-              setLastPhase("Stopped");
-              setActiveApproval(null);
-            }
-            if (event.kind === "done") {
-              setSending(false);
-              setLastPhase(Boolean(event.payload.canceled) ? "Stopped" : event.payload.error ? "Error" : "Done");
-              setActiveApproval(null);
-            }
+        try {
+          const event = JSON.parse(msg.data) as WebEvent;
+          processEvent(event);
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      es.onerror = () => {
+        if (cancelled) return;
+        consecutiveErrors += 1;
+        if (es.readyState === EventSource.CLOSED || consecutiveErrors >= 5) {
+          es.close();
+          if (consecutiveErrors >= 5) {
+            setError("Lost connection to local backend. Reload the page once it is back.");
           }
         }
-        setError(null);
-      } catch (err) {
-        if (!cancelled) setError((err as Error).message);
-      }
+      };
     };
-    const timer = window.setInterval(poll, session.busy ? 550 : 1100);
-    void poll();
+
+    open();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      source?.close();
     };
-  }, [session?.id, session?.busy, lastEventId]);
+  }, [session?.id, processEvent]);
 
   useEffect(() => {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
-  }, [items.length]);
+  }, [items.length, streamingText]);
+
+  const isAuthError = error === AUTH_REQUIRED_MESSAGE;
 
   const tokenTotal = session?.token_totals?.total_tokens ?? 0;
   const modelLabel = startup?.model ?? "unknown";
@@ -216,7 +274,8 @@ export function App() {
     setSession(data.session);
     setItems([]);
     setArtifacts([]);
-    setLastEventId(0);
+    lastEventIdRef.current = 0;
+    setStreamingText("");
     setActiveApproval(null);
     setError(null);
     await refreshStartup(data.session);
@@ -228,7 +287,8 @@ export function App() {
     setSession(data.session);
     setItems(data.events.map(textFromEvent).filter(Boolean) as TranscriptItem[]);
     setArtifacts(data.events.map(artifactFromEvent).filter(Boolean) as Artifact[]);
-    setLastEventId(data.session.event_count);
+    lastEventIdRef.current = data.session.event_count;
+    setStreamingText("");
     setActiveApproval(null);
     setError(null);
   }
@@ -376,6 +436,7 @@ export function App() {
           </div>
           <Transcript
             items={groupedItems}
+            streamingText={streamingText}
             quickPrompts={quickPrompts}
             onPrompt={setInput}
             transcriptRef={transcriptRef}
@@ -386,12 +447,14 @@ export function App() {
           />
           <ErrorRecovery
             error={error}
+            isAuthError={isAuthError}
             bypassOn={Boolean(startup?.bypass_approvals)}
             onRetry={() => void retryLastPrompt()}
             onSwitchModel={() => void switchModelRecovery()}
             onDisableBypass={() => void (startup?.bypass_approvals ? toggleBypassApprovals() : undefined)}
             onOpenLogs={() => void openLogs()}
             onNewSession={() => void newSession()}
+            onReload={() => window.location.reload()}
           />
           <Composer
             input={input}

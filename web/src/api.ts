@@ -66,14 +66,90 @@ export type WebEvent = {
     | "phase"
     | "stopped"
     | "usage"
-    | "done";
+    | "done"
+    | "stream_start"
+    | "stream_delta"
+    | "stream_cancel";
   payload: Record<string, unknown>;
 };
 
+export function streamUrl(sessionId: string, after: number): string {
+  const params = new URLSearchParams({
+    session_id: sessionId,
+    after: String(after),
+  });
+  if (authToken) {
+    params.set("token", authToken);
+  }
+  return `/api/stream?${params.toString()}`;
+}
+
+export const AUTH_REQUIRED_MESSAGE =
+  "Authentication required. Re-open the launch URL printed by the server (it includes a one-time token).";
+
+const TOKEN_STORAGE_KEY = "xai_auth_token";
+
+function captureTokenFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get("token");
+  if (fromUrl) {
+    try {
+      window.sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl);
+    } catch {
+      // sessionStorage unavailable; token will only live in memory for this load
+    }
+    params.delete("token");
+    const remaining = params.toString();
+    const newSearch = remaining ? `?${remaining}` : "";
+    const newUrl = window.location.pathname + newSearch + window.location.hash;
+    try {
+      window.history.replaceState({}, "", newUrl);
+    } catch {
+      // ignore
+    }
+    return fromUrl;
+  }
+  try {
+    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+let authToken: string | null = captureTokenFromUrl();
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+export function hasAuthToken(): boolean {
+  return Boolean(authToken);
+}
+
 const jsonHeaders = { "Content-Type": "application/json" };
 
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const headers = new Headers(extra);
+  if (authToken) {
+    headers.set("X-Auth-Token", authToken);
+  }
+  return headers;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const merged: RequestInit = { ...(init || {}) };
+  merged.headers = authHeaders(init?.headers);
+  const response = await fetch(url, merged);
+  if (response.status === 401) {
+    authToken = null;
+    try {
+      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    throw new Error(AUTH_REQUIRED_MESSAGE);
+  }
   const data = (await response.json()) as T & { ok?: boolean; error?: string };
   if (!response.ok || data.ok === false) {
     throw new Error(data.error || `Request failed: ${response.status}`);
@@ -169,5 +245,9 @@ export async function openLogsFolder(): Promise<Record<string, unknown>> {
 }
 
 export function localFileUrl(path: string): string {
-  return `/api/local-file?path=${encodeURIComponent(path)}`;
+  const params = new URLSearchParams({ path });
+  if (authToken) {
+    params.set("token", authToken);
+  }
+  return `/api/local-file?${params.toString()}`;
 }

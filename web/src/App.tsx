@@ -463,7 +463,7 @@ export function App() {
             onInput={setInput}
             onSubmit={(event) => void submit(event)}
             onStop={() => void stop()}
-            onTools={() => setControlsOpen(true)}
+            onSettings={() => setControlsOpen(true)}
           />
         </section>
       </section>

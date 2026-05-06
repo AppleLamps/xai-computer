@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, RefObject, useState } from "react";
+import { FormEvent, ReactNode, RefObject, useEffect, useRef, useState } from "react";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -7,21 +7,23 @@ import {
   ChevronRight,
   ClipboardCheck,
   Copy,
+  CornerDownLeft,
   FolderOpen,
   History,
   Lock,
   Monitor,
-  Plus,
   PanelRightOpen,
   RotateCcw,
   Send,
   Settings2,
   Shield,
+  Slash,
   Sparkles,
   Square,
+  Terminal,
   X
 } from "lucide-react";
-import { ApprovalCard, SavedSession, SessionInfo, Startup, localFileUrl } from "./api";
+import { ApprovalAction, ApprovalActionDetails, ApprovalActionTextPreview, ApprovalCard, SavedSession, SessionInfo, Startup, localFileUrl } from "./api";
 
 export type TranscriptItem =
   | { id: string; role: "user" | "assistant" | "info" | "error" | "progress" | "auto_approved" | "result" | "stopped"; text?: string; ts?: string; name?: string; result?: Record<string, unknown> }
@@ -499,6 +501,72 @@ function SessionsList({ sessions, onRestore }: { sessions: SavedSession[]; onRes
   );
 }
 
+export type SlashCommand = {
+  command: string;
+  label: string;
+  hint: string;
+  prompt: string;
+};
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    command: "/desktop",
+    label: "List Desktop",
+    hint: "Show contents of the Desktop folder",
+    prompt: "List what is on my Desktop and tell me the 5 most recently modified files."
+  },
+  {
+    command: "/recent",
+    label: "Recent files",
+    hint: "Recently modified files in a folder",
+    prompt: "Show me the 10 most recently modified files in my Desktop folder."
+  },
+  {
+    command: "/largest",
+    label: "Largest files",
+    hint: "Largest files in a folder",
+    prompt: "Find the 10 largest files in my Documents folder and summarize their types."
+  },
+  {
+    command: "/screenshot",
+    label: "Screenshot",
+    hint: "Capture the screen and describe it",
+    prompt: "Take a screenshot of my current screen and tell me what visible windows are open."
+  },
+  {
+    command: "/find",
+    label: "Find files",
+    hint: "Search for files by name or content",
+    prompt: "Search my Desktop recursively for files whose names or contents match: "
+  },
+  {
+    command: "/clipboard",
+    label: "Read clipboard",
+    hint: "Read and summarize current clipboard text",
+    prompt: "Read my clipboard and summarize what it contains."
+  },
+  {
+    command: "/windows",
+    label: "List windows",
+    hint: "List currently visible windows",
+    prompt: "List the windows currently open on my screen and what each one appears to be."
+  },
+  {
+    command: "/processes",
+    label: "List processes",
+    hint: "Show top processes by CPU/memory",
+    prompt: "List the top 10 running processes by memory usage."
+  }
+];
+
+function matchSlash(input: string): SlashCommand[] | null {
+  if (!input.startsWith("/")) return null;
+  const head = input.split(/\s/, 1)[0].toLowerCase();
+  if (head.length < 1) return null;
+  const matches = SLASH_COMMANDS.filter((cmd) => cmd.command.startsWith(head));
+  return matches.length > 0 ? matches : null;
+}
+
 export function Composer({
   input,
   canSend,
@@ -506,7 +574,7 @@ export function Composer({
   onInput,
   onSubmit,
   onStop,
-  onTools,
+  onSettings,
 }: {
   input: string;
   canSend: boolean;
@@ -514,68 +582,566 @@ export function Composer({
   onInput: (value: string) => void;
   onSubmit: (event?: FormEvent) => void;
   onStop: () => void;
-  onTools: () => void;
+  onSettings: () => void;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const matches = matchSlash(input);
+  const slashOpen = Boolean(matches && matches.length > 0);
+  const [highlight, setHighlight] = useState(0);
+
+  useEffect(() => {
+    setHighlight(0);
+  }, [input]);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const next = Math.min(ta.scrollHeight, 360);
+    ta.style.height = `${next}px`;
+  }, [input]);
+
+  function applyCommand(cmd: SlashCommand) {
+    onInput(cmd.prompt);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(cmd.prompt.length, cmd.prompt.length);
+      }
+    });
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashOpen && matches) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setHighlight((prev) => (prev + 1) % matches.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setHighlight((prev) => (prev - 1 + matches.length) % matches.length);
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        applyCommand(matches[highlight]);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        applyCommand(matches[highlight]);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onInput("");
+        return;
+      }
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      onSubmit();
+    }
+  }
+
   return (
     <form className="composer" onSubmit={(event) => onSubmit(event)}>
       <div className="composer-surface">
+        {slashOpen && matches && (
+          <div className="slash-menu" role="listbox" aria-label="Slash commands">
+            {matches.map((cmd, index) => (
+              <button
+                type="button"
+                key={cmd.command}
+                role="option"
+                aria-selected={index === highlight}
+                className={cls("slash-item", index === highlight && "active")}
+                onMouseEnter={() => setHighlight(index)}
+                onClick={() => applyCommand(cmd)}
+              >
+                <Slash size={13} />
+                <div>
+                  <strong>{cmd.command} <span className="slash-label">— {cmd.label}</span></strong>
+                  <p>{cmd.hint}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
+          ref={textareaRef}
           value={input}
           onChange={(event) => onInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-          placeholder="Ask xai-computer..."
+          onKeyDown={handleKeyDown}
+          placeholder="Ask xai-computer… (try / for commands)"
+          rows={1}
         />
         <div className="composer-toolbar">
-          <div className="composer-tools">
-            <button type="button" className="composer-icon" onClick={onTools} aria-label="Open tools">
-              <Plus size={20} />
+          <span className="composer-hint">
+            <CornerDownLeft size={12} /> <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>/</kbd> commands
+          </span>
+          <div className="composer-actions">
+            <button type="button" className="composer-tool-button" onClick={onSettings} title="Open settings">
+              <Settings2 size={16} /> <span>Settings</span>
             </button>
-            <button type="button" className="composer-tool-button" onClick={onTools}>
-              <Settings2 size={16} /> Tools
-            </button>
+            {busy ? (
+              <button type="button" className="composer-send stop-button" onClick={onStop} aria-label="Stop">
+                <Square size={15} />
+              </button>
+            ) : (
+              <button type="submit" className="composer-send" disabled={!canSend} aria-label="Send">
+                <Send size={17} />
+              </button>
+            )}
           </div>
-          {busy ? (
-            <button type="button" className="composer-send stop-button" onClick={onStop} aria-label="Stop">
-              <Square size={15} />
-            </button>
-          ) : (
-            <button type="submit" className="composer-send" disabled={!canSend} aria-label="Send">
-              <Send size={17} />
-            </button>
-          )}
         </div>
       </div>
     </form>
   );
 }
 
-export function ApprovalModal({ approval, onApprove }: { approval: ApprovalCard | null; onApprove: (answer: "yes" | "cancel") => void }) {
-  if (!approval) return null;
+function DetailField({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="approval-backdrop">
+    <div className="approval-field">
+      <span className="approval-field-label">{label}</span>
+      <div className="approval-field-value">{children}</div>
+    </div>
+  );
+}
+
+function PathBlock({ value }: { value: string }) {
+  return <code className="approval-path">{value}</code>;
+}
+
+function PreviewBlock({
+  preview,
+  diff = false,
+}: {
+  preview: ApprovalActionTextPreview;
+  diff?: boolean;
+}) {
+  const sizeText = preview.bytes === preview.chars
+    ? `${preview.chars.toLocaleString()} chars`
+    : `${preview.chars.toLocaleString()} chars · ${preview.bytes.toLocaleString()} bytes`;
+  return (
+    <div className="approval-preview">
+      <div className="approval-preview-meta">
+        {sizeText}{preview.truncated && " · truncated"}
+      </div>
+      <pre className={cls("approval-preview-body", diff && "diff")}>
+        {diff ? colorizeDiff(preview.preview) : preview.preview}
+      </pre>
+    </div>
+  );
+}
+
+function colorizeDiff(text: string): ReactNode {
+  return text.split(/\r?\n/).map((line, index) => {
+    let cls = "diff-line";
+    if (line.startsWith("+++") || line.startsWith("---")) cls += " diff-meta";
+    else if (line.startsWith("@@")) cls += " diff-hunk";
+    else if (line.startsWith("+")) cls += " diff-add";
+    else if (line.startsWith("-")) cls += " diff-del";
+    return (
+      <span key={index} className={cls}>
+        {line || " "}
+        {"\n"}
+      </span>
+    );
+  });
+}
+
+function ActionDetail({ action }: { action: ApprovalAction }) {
+  const details: ApprovalActionDetails = action.details ?? {};
+  const tool = action.tool_name;
+
+  if (tool === "run_command") {
+    return (
+      <div className="approval-detail">
+        <DetailField label="Command">
+          <code className="approval-cmd">{details.command ?? "?"}</code>
+        </DetailField>
+        {details.working_dir && (
+          <DetailField label="Working dir"><PathBlock value={details.working_dir} /></DetailField>
+        )}
+        {typeof details.timeout_sec === "number" && (
+          <DetailField label="Timeout">{details.timeout_sec}s</DetailField>
+        )}
+      </div>
+    );
+  }
+
+  if (tool === "write_file" || tool === "append_file") {
+    return (
+      <div className="approval-detail">
+        {details.path && <DetailField label="Path"><PathBlock value={details.path} /></DetailField>}
+        {tool === "write_file" && (
+          <DetailField label="Mode">
+            {details.overwrite ? "Overwrite (.bak backup)" : "New file"}
+          </DetailField>
+        )}
+        {details.content && <DetailField label="Content"><PreviewBlock preview={details.content} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "replace_in_file") {
+    return (
+      <div className="approval-detail">
+        {details.path && <DetailField label="Path"><PathBlock value={details.path} /></DetailField>}
+        {typeof details.replace_all === "boolean" && (
+          <DetailField label="Scope">{details.replace_all ? "All matches" : "First match"}</DetailField>
+        )}
+        {details.old_text && <DetailField label="Find"><PreviewBlock preview={details.old_text} /></DetailField>}
+        {details.new_text && <DetailField label="Replace with"><PreviewBlock preview={details.new_text} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "apply_patch") {
+    return (
+      <div className="approval-detail">
+        {details.path && <DetailField label="Path"><PathBlock value={details.path} /></DetailField>}
+        {typeof details.hunks === "number" && (
+          <DetailField label="Hunks">{details.hunks}</DetailField>
+        )}
+        {details.unified_diff && (
+          <DetailField label="Diff"><PreviewBlock preview={details.unified_diff} diff /></DetailField>
+        )}
+      </div>
+    );
+  }
+
+  if (tool === "move_file" || tool === "copy_file") {
+    return (
+      <div className="approval-detail">
+        {details.source && <DetailField label="From"><PathBlock value={details.source} /></DetailField>}
+        {details.destination && <DetailField label="To"><PathBlock value={details.destination} /></DetailField>}
+        {details.overwrite && <DetailField label="Overwrite">Existing destination will be replaced</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "rename_file") {
+    return (
+      <div className="approval-detail">
+        {details.source && <DetailField label="Source"><PathBlock value={details.source} /></DetailField>}
+        {details.new_name && <DetailField label="New name"><code>{details.new_name}</code></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "delete_file_to_recycle_bin") {
+    return (
+      <div className="approval-detail">
+        {details.path && <DetailField label="Path"><PathBlock value={details.path} /></DetailField>}
+        <DetailField label="Destination">Recycle Bin (restorable)</DetailField>
+      </div>
+    );
+  }
+
+  if (tool === "create_folder" || tool === "organize_desktop_by_type" || tool === "organize_folder") {
+    return (
+      <div className="approval-detail">
+        {(details.path || details.desktop_path) && (
+          <DetailField label="Path"><PathBlock value={(details.path ?? details.desktop_path) as string} /></DetailField>
+        )}
+        {details.mode && <DetailField label="Mode">{details.mode}</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "start_process") {
+    return (
+      <div className="approval-detail">
+        {details.executable && <DetailField label="Executable"><code>{details.executable}</code></DetailField>}
+        {details.args && details.args.length > 0 && (
+          <DetailField label="Args"><code>{details.args.join(" ")}</code></DetailField>
+        )}
+        {details.working_dir && <DetailField label="Working dir"><PathBlock value={details.working_dir} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "stop_process") {
+    return (
+      <div className="approval-detail">
+        {details.pid !== undefined && <DetailField label="PID">{String(details.pid)}</DetailField>}
+        {details.force && <DetailField label="Force">Yes (process will be killed)</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "browser_navigate") {
+    return (
+      <div className="approval-detail">
+        {details.url && <DetailField label="URL"><code>{details.url}</code></DetailField>}
+        {details.wait_for && <DetailField label="Wait for"><code>{details.wait_for}</code></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "browser_click" || tool === "browser_press") {
+    return (
+      <div className="approval-detail">
+        {details.selector && <DetailField label="Selector"><code>{details.selector}</code></DetailField>}
+        {details.key && <DetailField label="Key"><code>{details.key}</code></DetailField>}
+        {details.nth !== undefined && <DetailField label="nth">{details.nth}</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "browser_fill") {
+    return (
+      <div className="approval-detail">
+        {details.selector && <DetailField label="Selector"><code>{details.selector}</code></DetailField>}
+        {details.text && <DetailField label="Text"><PreviewBlock preview={details.text} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "browser_download") {
+    return (
+      <div className="approval-detail">
+        {details.url && <DetailField label="URL"><code>{details.url}</code></DetailField>}
+        {details.click_selector && <DetailField label="Trigger"><code>{details.click_selector}</code></DetailField>}
+        {details.save_as && <DetailField label="Save as"><PathBlock value={details.save_as} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "browser_screenshot") {
+    return (
+      <div className="approval-detail">
+        {details.selector ? (
+          <DetailField label="Selector"><code>{details.selector}</code></DetailField>
+        ) : (
+          <DetailField label="Scope">{details.full_page ? "Full page" : "Viewport"}</DetailField>
+        )}
+        {details.save_as && <DetailField label="Save as"><PathBlock value={details.save_as} /></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "type_text") {
+    return (
+      <div className="approval-detail">
+        {details.text && <DetailField label="Text"><PreviewBlock preview={details.text} /></DetailField>}
+        {details.delay_ms !== undefined && <DetailField label="Delay">{details.delay_ms}ms</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "press_hotkey") {
+    return (
+      <div className="approval-detail">
+        {details.keys && (
+          <DetailField label="Keys"><code>{details.keys.join(" + ")}</code></DetailField>
+        )}
+      </div>
+    );
+  }
+
+  if (tool === "click" || tool === "move_mouse" || tool === "scroll") {
+    return (
+      <div className="approval-detail">
+        {(details.x !== undefined || details.y !== undefined) && (
+          <DetailField label="Position">({details.x ?? "?"}, {details.y ?? "?"})</DetailField>
+        )}
+        {details.button && <DetailField label="Button">{details.button}</DetailField>}
+        {details.clicks !== undefined && <DetailField label="Clicks">{details.clicks}</DetailField>}
+        {details.amount !== undefined && <DetailField label="Amount">{details.amount}</DetailField>}
+        {details.direction && <DetailField label="Direction">{details.direction}</DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "focus_window") {
+    return (
+      <div className="approval-detail">
+        {details.window_id !== undefined && <DetailField label="Window">{String(details.window_id)}</DetailField>}
+        {details.title_substring && <DetailField label="Title contains"><code>{details.title_substring}</code></DetailField>}
+      </div>
+    );
+  }
+
+  if (tool === "read_clipboard") {
+    return (
+      <div className="approval-detail">
+        <DetailField label="Reads">Up to {details.max_chars ?? 5000} characters of clipboard contents</DetailField>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function ShellExplanation({ explanation }: { explanation: Record<string, string> }) {
+  const entries = Object.entries(explanation).filter(([, v]) => v && v.trim());
+  if (entries.length === 0) return null;
+  return (
+    <div className="shell-explanation">
+      <div className="shell-explanation-title">
+        <Terminal size={14} /> What this command does
+      </div>
+      {entries.map(([key, value]) => (
+        <div className="shell-explanation-row" key={key}>
+          <span>{prettyShellKey(key)}</span>
+          <p>{value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function prettyShellKey(key: string): string {
+  if (key === "summary") return "Summary";
+  if (key === "side_effects") return "Side effects";
+  if (key === "reversibility") return "Reversibility";
+  return key.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+function ApprovalActionRow({
+  action,
+  expanded,
+  onToggle,
+}: {
+  action: ApprovalAction;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const detail = <ActionDetail action={action} />;
+  const hasDetail = detail !== null;
+  return (
+    <div className={cls("approval-row", `risk-${action.risk}`)}>
+      <button
+        className="approval-row-head"
+        type="button"
+        onClick={hasDetail ? onToggle : undefined}
+        aria-expanded={hasDetail ? expanded : undefined}
+      >
+        <span className="approval-index">{action.index}</span>
+        <div className="approval-row-summary">
+          <strong>{action.tool_name}</strong>
+          <p>{action.label}</p>
+        </div>
+        <em className={cls("approval-risk", `risk-${action.risk}`)}>{action.risk}</em>
+        {hasDetail && (
+          <span className="approval-row-toggle" aria-hidden="true">
+            {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          </span>
+        )}
+      </button>
+      {hasDetail && expanded && <div className="approval-row-detail">{detail}</div>}
+    </div>
+  );
+}
+
+export function ApprovalModal({ approval, onApprove }: { approval: ApprovalCard | null; onApprove: (answer: "yes" | "cancel") => void }) {
+  const approveRef = useRef<HTMLButtonElement | null>(null);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (!approval) return;
+    setExpanded(() => {
+      const next = new Set<number>();
+      const expandableIndices = approval.actions
+        .filter((a) => ["run_command", "write_file", "append_file", "replace_in_file", "apply_patch"].includes(a.tool_name))
+        .map((a) => a.index);
+      if (approval.actions.length === 1) next.add(approval.actions[0].index);
+      else expandableIndices.slice(0, 2).forEach((i) => next.add(i));
+      return next;
+    });
+    const id = window.setTimeout(() => approveRef.current?.focus(), 30);
+    return () => window.clearTimeout(id);
+  }, [approval]);
+
+  useEffect(() => {
+    if (!approval) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const isField = tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onApprove("cancel");
+      } else if (event.key === "Enter" && !isField && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        onApprove("yes");
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [approval, onApprove]);
+
+  if (!approval) return null;
+
+  function toggle(index: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
+
+  const counts = approval.actions.reduce<Record<string, number>>((acc, action) => {
+    acc[action.risk] = (acc[action.risk] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div className="approval-backdrop" role="dialog" aria-modal="true" aria-label="Approval required">
       <section className={cls("approval-card", approval.risk_level)}>
         <header>
-          <div><h2>Approval Required</h2><p>{approval.summary}</p></div>
-          <span className="risk">{approval.risk_level}</span>
+          <div>
+            <h2>Approval Required</h2>
+            <p>{approval.summary}</p>
+          </div>
+          <span className={cls("risk", `risk-${approval.risk_level}`)}>{approval.risk_level}</span>
         </header>
+        <div className="approval-meta">
+          {approval.affected_root && (
+            <div className="approval-meta-row">
+              <FolderOpen size={14} />
+              <span>Scope</span>
+              <code>{approval.affected_root}</code>
+            </div>
+          )}
+          <div className="approval-meta-row">
+            <Shield size={14} />
+            <span>Actions</span>
+            <em>
+              {approval.actions.length} total
+              {counts.high ? ` · ${counts.high} high` : ""}
+              {counts.medium ? ` · ${counts.medium} medium` : ""}
+              {counts.low ? ` · ${counts.low} low` : ""}
+            </em>
+          </div>
+        </div>
+        {approval.shell_explanation && <ShellExplanation explanation={approval.shell_explanation} />}
         <div className="approval-actions">
           {approval.actions.map((action) => (
-            <div className="approval-row" key={`${action.index}-${action.label}`}>
-              <span>{action.index}</span>
-              <div><strong>{action.tool_name}</strong><p>{action.label}</p></div>
-              <em>{action.risk}</em>
-            </div>
+            <ApprovalActionRow
+              key={`${action.index}-${action.tool_name}`}
+              action={action}
+              expanded={expanded.has(action.index)}
+              onToggle={() => toggle(action.index)}
+            />
           ))}
         </div>
         {approval.dry_run && <div className="dry-run"><ClipboardCheck size={15} /> Dry-run is on; actions will be simulated.</div>}
         <footer>
-          <button className="approve" onClick={() => onApprove("yes")}><Check size={17} /> Approve</button>
-          <button className="cancel" onClick={() => onApprove("cancel")}><X size={17} /> Deny</button>
+          <span className="approval-shortcuts">
+            <kbd>Esc</kbd> deny · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> approve
+          </span>
+          <div className="approval-buttons">
+            <button className="cancel" onClick={() => onApprove("cancel")}><X size={17} /> Deny</button>
+            <button ref={approveRef} className="approve" onClick={() => onApprove("yes")}><Check size={17} /> Approve</button>
+          </div>
         </footer>
       </section>
     </div>

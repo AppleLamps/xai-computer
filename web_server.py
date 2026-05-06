@@ -41,7 +41,115 @@ from logger import log_event
 from safety import is_path_allowed
 from schemas import SYSTEM_PROMPT
 from session_store import SessionStore
+from shell_guard import redact_secrets
 from undo import get_history, undo_last
+
+
+_ACTION_DETAIL_MAX = 600
+
+
+def _redact_preview(text: str, *, max_chars: int = _ACTION_DETAIL_MAX) -> dict[str, Any]:
+    """Build a redacted, length-capped preview of a free-form text argument."""
+    raw = "" if text is None else str(text)
+    redacted = redact_secrets(raw)
+    truncated = len(redacted) > max_chars
+    preview = redacted[:max_chars] + ("…" if truncated else "")
+    return {
+        "preview": preview,
+        "chars": len(raw),
+        "bytes": len(raw.encode("utf-8", errors="replace")),
+        "truncated": truncated,
+    }
+
+
+def _action_details(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Return a small, redacted dict the UI can render verbatim per action."""
+
+    def pick(*names: str) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for name in names:
+            if name in args and args[name] is not None:
+                value = args[name]
+                if isinstance(value, str):
+                    out[name] = redact_secrets(value)
+                else:
+                    out[name] = value
+        return out
+
+    if tool == "run_command":
+        details = pick("command", "working_dir", "timeout_sec")
+        return details
+    if tool == "write_file":
+        details = pick("path", "overwrite")
+        details["content"] = _redact_preview(args.get("content", ""))
+        return details
+    if tool == "append_file":
+        details = pick("path")
+        details["content"] = _redact_preview(args.get("content", ""))
+        return details
+    if tool == "replace_in_file":
+        details = pick("path", "replace_all")
+        details["old_text"] = _redact_preview(args.get("old_text", ""))
+        details["new_text"] = _redact_preview(args.get("new_text", ""))
+        return details
+    if tool == "apply_patch":
+        details = pick("path")
+        diff = args.get("unified_diff", "") or ""
+        details["unified_diff"] = _redact_preview(diff, max_chars=1200)
+        details["hunks"] = diff.count("@@") // 2 if diff else 0
+        return details
+    if tool in ("move_file", "copy_file"):
+        return pick("source", "destination", "overwrite")
+    if tool == "rename_file":
+        return pick("source", "new_name")
+    if tool == "delete_file_to_recycle_bin":
+        return pick("path")
+    if tool == "create_folder":
+        return pick("path")
+    if tool == "organize_desktop_by_type":
+        return pick("desktop_path")
+    if tool == "organize_folder":
+        return pick("path", "mode")
+    if tool == "start_process":
+        details = pick("executable", "working_dir")
+        raw_args = args.get("args") or []
+        if isinstance(raw_args, list):
+            details["args"] = [redact_secrets(str(item)) for item in raw_args]
+        return details
+    if tool == "stop_process":
+        return pick("pid", "force")
+    if tool == "focus_window":
+        return pick("window_id", "title_substring")
+    if tool in ("move_mouse", "click", "scroll"):
+        return pick("x", "y", "button", "clicks", "amount", "direction")
+    if tool == "type_text":
+        details = pick("delay_ms")
+        details["text"] = _redact_preview(args.get("text", ""), max_chars=240)
+        return details
+    if tool == "press_hotkey":
+        keys = args.get("keys") or []
+        if isinstance(keys, list):
+            return {"keys": [str(k) for k in keys]}
+        return {}
+    if tool == "browser_navigate":
+        return pick("url", "wait_for")
+    if tool == "browser_click":
+        return pick("selector", "nth")
+    if tool == "browser_fill":
+        details = pick("selector")
+        details["text"] = _redact_preview(args.get("text", ""), max_chars=240)
+        return details
+    if tool == "browser_press":
+        return pick("selector", "key")
+    if tool == "browser_download":
+        return pick("url", "click_selector", "save_as")
+    if tool == "browser_screenshot":
+        return pick("selector", "full_page", "save_as")
+    if tool == "read_clipboard":
+        return pick("max_chars")
+    if tool == "window_screenshot":
+        return pick("window_id")
+    return {}
 
 
 def _utc_now() -> str:
@@ -68,6 +176,7 @@ def _card_to_dict(card: ApprovalCard, generation: int) -> dict[str, Any]:
                 "action_class": a.action_class,
                 "label": a.label,
                 "risk": a.risk,
+                "details": _action_details(a.tool_name, a.arguments),
             }
             for a in card.actions
         ],

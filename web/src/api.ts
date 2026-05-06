@@ -28,12 +28,63 @@ export type SavedSession = {
   token_totals?: Record<string, number>;
 };
 
+export type ApprovalActionTextPreview = {
+  preview: string;
+  chars: number;
+  bytes: number;
+  truncated: boolean;
+};
+
+export type ApprovalActionDetails = Partial<{
+  command: string;
+  working_dir: string;
+  timeout_sec: number;
+  path: string;
+  overwrite: boolean;
+  source: string;
+  destination: string;
+  new_name: string;
+  desktop_path: string;
+  mode: string;
+  executable: string;
+  args: string[];
+  pid: number | string;
+  force: boolean;
+  window_id: number | string;
+  title_substring: string;
+  x: number;
+  y: number;
+  button: string;
+  clicks: number;
+  amount: number;
+  direction: string;
+  delay_ms: number;
+  keys: string[];
+  url: string;
+  selector: string;
+  nth: number;
+  full_page: boolean;
+  save_as: string;
+  click_selector: string;
+  key: string;
+  wait_for: string;
+  max_chars: number;
+  hunks: number;
+  replace_all: boolean;
+  content: ApprovalActionTextPreview;
+  text: ApprovalActionTextPreview;
+  old_text: ApprovalActionTextPreview;
+  new_text: ApprovalActionTextPreview;
+  unified_diff: ApprovalActionTextPreview;
+}>;
+
 export type ApprovalAction = {
   index: number;
   tool_name: string;
   action_class: string;
   label: string;
   risk: "low" | "medium" | "high";
+  details?: ApprovalActionDetails;
 };
 
 export type ApprovalCard = {
